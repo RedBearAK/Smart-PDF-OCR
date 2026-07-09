@@ -59,6 +59,18 @@ def _writable(path):
     return ""
 
 
+def _same_file(a, b):
+    """True when two paths point at the same file, allowing for ./ and symlinks."""
+    if not a or not b:
+        return False
+    try:
+        if os.path.exists(a) and os.path.exists(b):
+            return os.path.samefile(a, b)
+    except OSError:
+        pass
+    return os.path.abspath(a) == os.path.abspath(b)
+
+
 def _path_problems(args):
     """Every unusable path, found before a single page is recognized."""
     problems = []
@@ -73,15 +85,36 @@ def _path_problems(args):
         why = _readable(path)
         if why:
             problems.append("{0}: {1} {2}".format(label, path, why))
-    for label, path in (("--output", args.output),
-                        ("--review-out", args.review_out),
-                        ("--learn-profile", args.learn_profile),
-                        ("--pdf-out", args.pdf_out)):
+
+    outputs = (("--output", args.output),
+               ("--review-out", args.review_out),
+               ("--learn-profile", args.learn_profile),
+               ("--pdf-out", args.pdf_out))
+    source = args.input or args.cached
+    seen = {}
+    for label, path in outputs:
         if not path:
             continue
         why = _writable(path)
         if why:
             problems.append("{0}: {1} {2}".format(label, path, why))
+            continue
+        # Never write over the file being read. This is irreversible and has no
+        # legitimate use, so it is refused outright, with no --force.
+        if _same_file(path, source):
+            problems.append("{0}: {1} is the input file; refusing to overwrite it"
+                            .format(label, path))
+            continue
+        # Two outputs aimed at one path would have the last silently win.
+        if path in seen:
+            problems.append("{0} and {1} both write to {2}"
+                            .format(seen[path], label, path))
+            continue
+        seen[path] = label
+        # An existing output is overwritten only with --force.
+        if os.path.exists(path) and not args.force:
+            problems.append("{0}: {1} already exists; pass --force to overwrite"
+                            .format(label, path))
     return problems
 
 
@@ -205,6 +238,8 @@ def build_parser():
                         help="file of strings that can never be correct, one per line")
     parser.add_argument("--disagree-ratio", type=float, default=DISAGREE_RATIO,
                         help="similarity floor for flagging confident disagreements")
+    parser.add_argument("--force", action="store_true",
+                        help="overwrite existing output files (never the input)")
     return parser
 
 

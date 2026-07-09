@@ -18,6 +18,14 @@ import tempfile
 import smart_pdf_ocr.cli as cli
 
 
+def _fresh(suffix):
+    """A unique path that does NOT yet exist, so the overwrite guard stays quiet."""
+    handle = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
+    handle.close()
+    os.unlink(handle.name)
+    return handle.name
+
+
 def _run(argv):
     stderr = io.StringIO()
     with contextlib.redirect_stderr(stderr), contextlib.redirect_stdout(io.StringIO()):
@@ -87,12 +95,12 @@ def test_malformed_json_names_the_file():
 def test_input_flag_and_positional_are_equivalent():
     """-i and the bare positional reach the same place; order does not matter."""
     dump = _cached_dump()
-    out = tempfile.NamedTemporaryFile(suffix=".txt", delete=False)
-    out.close()
+    out = _fresh(".txt")
     # filename last, via -i, with options first -- the pasteable-command case
-    code, err = _run(["-o", out.name, "--cached", dump])
+    code, err = _run(["-o", out, "--cached", dump])
     os.unlink(dump)
-    os.unlink(out.name)
+    if os.path.exists(out):
+        os.unlink(out)
     print(f"  options-first, --cached -> exit {code}")
     return code == 0
 
@@ -107,13 +115,48 @@ def test_input_given_twice_is_refused():
 def test_a_good_run_still_succeeds():
     """Validation must not reject a correct invocation."""
     dump = _cached_dump()
-    out = tempfile.NamedTemporaryFile(suffix=".txt", delete=False)
-    out.close()
-    code, err = _run(["--cached", dump, "-o", out.name])
+    out = _fresh(".txt")
+    code, err = _run(["--cached", dump, "-o", out])
     os.unlink(dump)
-    os.unlink(out.name)
+    if os.path.exists(out):
+        os.unlink(out)
     print(f"  exit={code}")
     return code == 0
+
+
+def test_existing_output_needs_force():
+    """An existing output is refused without --force, and allowed with it."""
+    dump = _cached_dump()
+    out = _fresh(".txt")
+    open(out, "w").write("previous run")
+    denied, _ = _run(["--cached", dump, "-o", out])
+    allowed, _ = _run(["--cached", dump, "-o", out, "--force"])
+    os.unlink(dump)
+    if os.path.exists(out):
+        os.unlink(out)
+    print(f"  no force -> {denied}, with force -> {allowed}")
+    return denied == 2 and allowed == 0
+
+
+def test_pdf_out_will_not_overwrite_the_input():
+    """--pdf-out aimed at the input PDF is refused even with --force."""
+    src = _fresh(".pdf")
+    with open(src, "wb") as handle:
+        handle.write(b"%PDF-1.4\n%%EOF\n")
+    code, err = _run(["-i", src, "-o", _fresh(".txt"), "--pdf-out", src, "--force"])
+    os.unlink(src)
+    print(f"  exit={code}  {'input file' in err}")
+    return code == 2 and "input file" in err
+
+
+def test_two_outputs_to_one_path_refused():
+    """Two outputs aimed at the same path would let the last silently win."""
+    dump = _cached_dump()
+    shared = _fresh(".txt")
+    code, err = _run(["--cached", dump, "-o", shared, "--review-out", shared])
+    os.unlink(dump)
+    print(f"  exit={code}  {'both write' in err}")
+    return code == 2 and "both write" in err
 
 
 def main():
@@ -126,6 +169,9 @@ def main():
         test_a_good_run_still_succeeds,
         test_input_flag_and_positional_are_equivalent,
         test_input_given_twice_is_refused,
+        test_existing_output_needs_force,
+        test_pdf_out_will_not_overwrite_the_input,
+        test_two_outputs_to_one_path_refused,
     ]
     score = 0
     for test in tests:
