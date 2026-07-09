@@ -1,0 +1,387 @@
+"""Command-line entry point for smart_pdf_ocr.
+
+smart_pdf_ocr/cli.py
+
+Runs the whole pipeline: ingest a document (real PDF, image bundle, or bare
+image), recognize every page with the primary backend, apply the cross-page
+correction layer, and write a clean text dump. ``--cached`` skips recognition and
+feeds a saved OCR dump straight into the correction layer, which is how the
+correction stage is exercised without re-running the engine.
+
+The support summary always goes to stderr, so a document that cannot support
+cross-page consensus says so rather than quietly correcting nothing.
+
+Every path the run depends on is checked before any page is recognized. Four of
+them -- the corrected text, the review file, the learned profile, and the review
+file being applied -- are otherwise not touched until the recognizer has finished,
+so a mistyped directory would be discovered only after a quarter of an hour of
+work had been thrown away. A missing file is a usage error, not a traceback.
+"""
+
+import os
+import sys
+import shutil
+import argparse
+
+from smart_pdf_ocr.review.report import write_review
+from smart_pdf_ocr.recognize import rapidocr_backend
+from smart_pdf_ocr.review.overlay import load_rules, apply_rules
+from smart_pdf_ocr.correct.disagree import DISAGREE_RATIO
+from smart_pdf_ocr.correct.pipeline import correct_document, assemble_text
+from smart_pdf_ocr.correct.normalize import MODE_EVIDENCE, MODE_FORCE, MODE_OFF
+from smart_pdf_ocr.recognize.backend import load_cached_ocr
+from smart_pdf_ocr.ingest.container import sniff, resolve_dpi, enumerate_pages, available_renderer
+from smart_pdf_ocr.review.profile import counts_of, load_profile, save_profile, learn_profile
+from smart_pdf_ocr.correct.errors import contradictions, malformed, load_error_patterns
+from smart_pdf_ocr.correct.lexical import known_entries, known_tokens, load_patterns, make_plausibility
+
+
+def _readable(path):
+    if not os.path.exists(path):
+        return "does not exist"
+    if os.path.isdir(path):
+        return "is a directory, not a file"
+    if not os.access(path, os.R_OK):
+        return "is not readable"
+    return ""
+
+
+def _writable(path):
+    if os.path.isdir(path):
+        return "is a directory, not a file"
+    parent = os.path.dirname(os.path.abspath(path))
+    if not os.path.isdir(parent):
+        return "directory " + parent + " does not exist"
+    if not os.access(parent, os.W_OK):
+        return "directory " + parent + " is not writable"
+    if os.path.exists(path) and not os.access(path, os.W_OK):
+        return "is not writable"
+    return ""
+
+
+def _path_problems(args):
+    """Every unusable path, found before a single page is recognized."""
+    problems = []
+    for label, path in (("input document", args.input),
+                        ("--cached", args.cached),
+                        ("--known-patterns", args.known_patterns),
+                        ("--error-patterns", args.error_patterns),
+                        ("--review-in", args.review_in),
+                        ("--profile", args.profile)):
+        if not path:
+            continue
+        why = _readable(path)
+        if why:
+            problems.append("{0}: {1} {2}".format(label, path, why))
+    for label, path in (("--output", args.output),
+                        ("--review-out", args.review_out),
+                        ("--learn-profile", args.learn_profile),
+                        ("--pdf-out", args.pdf_out)):
+        if not path:
+            continue
+        why = _writable(path)
+        if why:
+            problems.append("{0}: {1} {2}".format(label, path, why))
+    return problems
+
+
+def _progress(done, total, quiet):
+    """A multi-minute run should not look like a hang."""
+    if quiet:
+        return
+    if sys.stderr.isatty():
+        sys.stderr.write("\r  recognizing page %d/%d" % (done, total))
+        if done == total:
+            sys.stderr.write("\n")
+        sys.stderr.flush()
+        return
+    if done == total or done % 10 == 0:
+        print("  recognizing page %d/%d" % (done, total), file=sys.stderr)
+
+
+def _recognize_all(image_paths, quiet=False):
+    if not rapidocr_backend.is_available():
+        raise RuntimeError("rapidocr backend unavailable; install the 'rapidocr' package")
+    total = len(image_paths)
+    results = []
+    for index, image_path in enumerate(image_paths):
+        results.append(rapidocr_backend.recognize_page(image_path, index + 1))
+        _progress(index + 1, total, quiet)
+    return results
+
+
+def _requested_dpi(parser, value):
+    if value == "auto":
+        return None
+    if not value.isdigit() or int(value) <= 0:
+        parser.error("--dpi must be a positive integer or 'auto'")
+    return int(value)
+
+
+def _write_pdf(args, pages, corrected, image_paths):
+    from PIL import Image
+    from smart_pdf_ocr.ingest.container import sniff
+    from smart_pdf_ocr.review.pdf_out import is_available, pages_from, write_searchable_pdf
+    if not is_available():
+        print("--pdf-out needs pikepdf (pip install 'smart-pdf-ocr[searchable-pdf]')",
+              file=sys.stderr)
+        return
+    if not args.input or sniff(args.input) != "pdf":
+        print("--pdf-out appends a text layer to a source PDF; the input must be a PDF",
+              file=sys.stderr)
+        return
+    have_box = any(line.box for page in pages for line in page.lines)
+    if not have_box:
+        print("--pdf-out: recognizer returned no boxes; skipping", file=sys.stderr)
+        return
+    sizes = []
+    for image_path in image_paths:
+        with Image.open(image_path) as image:
+            sizes.append(image.size)
+    sheet = pages_from(pages, corrected)
+    write_searchable_pdf(args.pdf_out, args.input, sheet, sizes)
+    print("searchable PDF: {0} ({1} pages)".format(args.pdf_out, len(sheet)), file=sys.stderr)
+
+
+def _load_pages(args):
+    if args.cached:
+        return load_cached_ocr(args.cached), None, ()
+    image_paths, workdir = enumerate_pages(args.input, dpi=args.dpi)
+    try:
+        return _recognize_all(image_paths, quiet=args.quiet), workdir, tuple(image_paths)
+    except Exception:
+        if workdir:
+            shutil.rmtree(workdir, ignore_errors=True)
+        raise
+
+
+def _print_support(diagnostics):
+    needed = diagnostics["min_clean_siblings"]
+    conf = diagnostics["clean_conf"]
+    pages_needed = diagnostics["min_cluster_pages"]
+    print("consensus rule: a line is only rewritten with {0} clean sibling reads "
+          "at >= {1:.2f} confidence".format(needed, conf), file=sys.stderr)
+    for key, pages, can_vote in diagnostics["clusters"]:
+        if can_vote:
+            state = "consensus active"
+        else:
+            state = "NO CONSENSUS - needs {0} pages, nothing will be corrected".format(pages_needed)
+        label = "page" if pages == 1 else "pages"
+        print("  format {0}: {1} {2} -> {3}".format(key, pages, label, state), file=sys.stderr)
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(
+        prog="smart-pdf-ocr",
+        description="Cross-page OCR correction behind a pluggable recognizer.",
+    )
+    parser.add_argument("input_pos", nargs="?", metavar="input",
+                        help="document to process (pdf / bundle / image)")
+    parser.add_argument("-i", "--input", dest="input_flag",
+                        help="the same document, as a flag, so it may appear in any order")
+    parser.add_argument("-o", "--output", help="write corrected text here (default: stdout)")
+    parser.add_argument("--cached", help="use a saved OCR JSON dump instead of recognizing")
+    parser.add_argument("--dpi", default="auto",
+                        help="rasterization DPI for real PDFs, or 'auto' for the scan's "
+                             "native resolution (the default)")
+    parser.add_argument("--gate", type=float, default=0.90, help="confidence gate for correction")
+    parser.add_argument("--report", action="store_true", help="print the change report to stderr")
+    parser.add_argument("--review-out", help="write a review file (.tsv/.csv) of every flagged line")
+    parser.add_argument("--review-in", help="apply human corrections from a completed review file")
+    parser.add_argument("--profile", help="load a vendor profile of canonicals (JSON)")
+    parser.add_argument("--learn-profile", help="write a vendor profile learned from this run")
+    parser.add_argument("--quiet", action="store_true", help="suppress the per-page progress line")
+    parser.add_argument("--keep-diacritics", action="store_true",
+                        help="never fold non-ASCII characters to ASCII")
+    parser.add_argument("--force-ascii", action="store_true",
+                        help="fold non-ASCII even without corpus evidence")
+    parser.add_argument("--keep-typography", action="store_true",
+                        help="flag spacing, punctuation and case slips instead of fixing them")
+    parser.add_argument("--pdf-out",
+                        help="also write a searchable PDF: the scan under a corrected text layer")
+    parser.add_argument("--known-patterns",
+                        help="file of known words, names and places, one per line")
+    parser.add_argument("--error-patterns",
+                        help="file of strings that can never be correct, one per line")
+    parser.add_argument("--disagree-ratio", type=float, default=DISAGREE_RATIO,
+                        help="similarity floor for flagging confident disagreements")
+    return parser
+
+
+def main(argv=None):
+    """Entry point. Usage problems exit 2; runtime failures exit 1."""
+    try:
+        return _run(argv)
+    except KeyboardInterrupt:
+        print("interrupted", file=sys.stderr)
+        return 130
+    except (OSError, ValueError) as exc:
+        print("error: " + str(exc), file=sys.stderr)
+        return 1
+
+
+def _run(argv=None):
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    args.input = args.input_flag or args.input_pos
+    if args.input_flag and args.input_pos and args.input_flag != args.input_pos:
+        parser.error("input given both positionally and with -i; use one")
+    if not args.input and not args.cached:
+        parser.error("provide an input document or --cached OCR dump")
+
+    problems = _path_problems(args)
+    if problems:
+        for problem in problems:
+            print("error: " + problem, file=sys.stderr)
+        return 2
+
+    requested = _requested_dpi(parser, str(args.dpi))
+    if args.input and not args.cached:
+        kind = sniff(args.input)
+        print("container: " + kind, file=sys.stderr)
+        if kind == "pdf":
+            renderer = available_renderer()
+            print("renderer: " + (renderer if renderer else "NONE"), file=sys.stderr)
+            dpi, native, warning = resolve_dpi(args.input, requested)
+            args.dpi = dpi
+            origin = "native" if native and dpi == native else "requested"
+            print("dpi: {0} ({1}){2}".format(
+                dpi, origin, "; scan is {0} dpi".format(native) if native else ""),
+                file=sys.stderr)
+            if warning:
+                print("warning: " + warning, file=sys.stderr)
+        else:
+            args.dpi = requested
+
+    profile = None
+    if args.profile:
+        profile = load_profile(args.profile)
+        slots, lines = counts_of(profile)
+        print("profile: {0} slot canonicals, {1} standing lines".format(slots, lines),
+              file=sys.stderr)
+
+    patterns = load_patterns(args.known_patterns) if args.known_patterns else ()
+    known = known_tokens(patterns)
+    vocabulary = known_entries(patterns)
+    plausible = make_plausibility(patterns)
+    print("lexical tiebreaker: wordfreq, {0} known terms".format(len(known)),
+          file=sys.stderr)
+
+    error_patterns = load_error_patterns(args.error_patterns) if args.error_patterns else ()
+    if error_patterns:
+        broken = malformed(error_patterns)
+        if broken:
+            for pattern in broken:
+                print("error pattern {0!r} must name exactly one alphanumeric "
+                      "term".format(pattern), file=sys.stderr)
+            return 2
+        clashes = contradictions(error_patterns, vocabulary)
+        if clashes:
+            for clash in clashes:
+                print("contradiction: {0!r} is in both the error and known "
+                      "pattern files".format(clash), file=sys.stderr)
+            return 2
+        print("error patterns: {0} loaded".format(len(error_patterns)), file=sys.stderr)
+    ascii_mode = MODE_EVIDENCE
+    if args.keep_diacritics:
+        ascii_mode = MODE_OFF
+    elif args.force_ascii:
+        ascii_mode = MODE_FORCE
+
+    pages, workdir, image_paths = _load_pages(args)
+    try:
+        corrected, report, diagnostics = correct_document(pages, conf_gate=args.gate,
+                                                          profile=profile,
+                                                          ascii_mode=ascii_mode,
+                                                          plausible=plausible,
+                                                          disagree_ratio=args.disagree_ratio,
+                                                          known=known,
+                                                          error_patterns=error_patterns,
+                                                          vocabulary=vocabulary,
+                                                          typography=not args.keep_typography)
+    except Exception:
+        if workdir:
+            shutil.rmtree(workdir, ignore_errors=True)
+        raise
+
+    _print_support(diagnostics)
+
+    if args.review_in:
+        rules, warnings = load_rules(args.review_in)
+        for warning in warnings:
+            print("review warning: " + warning, file=sys.stderr)
+        forced, stale = apply_rules(pages, corrected, rules)
+        report.extend(forced)
+        print("forced corrections: {0} of {1} rules".format(len(forced), len(rules)),
+              file=sys.stderr)
+        for rule in stale:
+            print("  stale rule (matched nothing): p{0} {1!r}".format(rule.page, rule.original),
+                  file=sys.stderr)
+
+    text = assemble_text(corrected)
+    if args.output:
+        with open(args.output, "w", encoding="utf-8") as handle:
+            handle.write(text + "\n")
+        print("wrote " + args.output, file=sys.stderr)
+    else:
+        sys.stdout.write(text + "\n")
+
+    if args.review_out:
+        source = os.path.basename(args.input or args.cached or "document")
+        written = write_review(args.review_out, source, pages, report, diagnostics)
+        print("review file: {0} ({1} rows)".format(args.review_out, written), file=sys.stderr)
+
+    if args.learn_profile:
+        learned = learn_profile(pages, corrected, plausible)
+        save_profile(args.learn_profile, learned)
+        slots, lines = counts_of(learned)
+        print("learned profile: {0} slot canonicals, {1} standing lines -> {2}".format(
+            slots, lines, args.learn_profile), file=sys.stderr)
+
+    if args.pdf_out:
+        _write_pdf(args, pages, corrected, image_paths)
+
+    if workdir:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+    stray = diagnostics.get("unresolved_non_ascii", [])
+    if stray:
+        print("non-ASCII left in place (no corpus evidence): " + str(len(stray)), file=sys.stderr)
+
+    saves = diagnostics.get("protected", [])
+    if saves:
+        print("guards prevented {0} rewrite(s); see the review file".format(len(saves)),
+              file=sys.stderr)
+
+    encounters = diagnostics.get("error_events", [])
+    if encounters:
+        fixed = sum(1 for entry in encounters if entry[4] == "corrected")
+        print("error patterns matched {0} time(s): {1} corrected, {2} flagged".format(
+            len(encounters), fixed, len(encounters) - fixed), file=sys.stderr)
+
+    disagreements = diagnostics.get("disagreements", [])
+    if disagreements:
+        characters = sum(1 for entry in disagreements if entry[4] == "disagrees")
+        print("confident disagreements: {0} ({1} character, {2} spacing) - not corrected".format(
+            len(disagreements), characters, len(disagreements) - characters), file=sys.stderr)
+
+    print("corrections: " + str(len(report)), file=sys.stderr)
+    if args.report:
+        for page_number, kind, old, new in report:
+            print("  p{0} [{1}] {2!r} -> {3!r}".format(page_number, kind, old, new), file=sys.stderr)
+        left = diagnostics["uncorrected"]
+        print("uncorrected low-confidence lines: " + str(len(left)), file=sys.stderr)
+        for page_number, conf, text_line, reason in left:
+            print("  p{0} {1:.2f} {2!r}  ({3})".format(page_number, conf, text_line, reason),
+                  file=sys.stderr)
+        for page_number, conf, text_line, canonical, kind in disagreements:
+            print("  p{0} {1:.2f} [{2}] {3!r}  vs canonical {4!r}".format(
+                page_number, conf, kind, text_line, canonical), file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+
+
+# End of file #

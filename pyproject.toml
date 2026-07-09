@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "smart-pdf-ocr"
+version = "0.1.0b1"
+description = "Cross-page OCR correction layer behind a pluggable recognition front-end."
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = ["rapidocr", "pypdfium2", "pillow", "wordfreq"]
+
+[project.optional-dependencies]
+validators = ["pytesseract"]
+searchable-pdf = ["pikepdf"]
+
+[project.scripts]
+smart-pdf-ocr = "smart_pdf_ocr.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+filterwarnings = ["ignore::pytest.PytestReturnNotNoneWarning"]
