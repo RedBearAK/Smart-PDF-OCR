@@ -8,7 +8,7 @@ rather than appearing to have worked.
 """
 
 from smart_pdf_ocr.recognize.backend import PageLine, PageResult
-from smart_pdf_ocr.correct.pipeline import correct_document, MIN_CLUSTER_PAGES
+from smart_pdf_ocr.correct.pipeline import assemble_text, correct_document, MIN_CLUSTER_PAGES
 
 
 FOOTER = "411 S 1st Street - Chelan, WA 98816 - Fx# 509-888-0058"
@@ -68,6 +68,25 @@ def test_numeric_line_survives_correction():
     kept = corrected[1][2]
     print(f"  page 1 body line -> {kept!r}")
     return kept == "body value 1"
+
+
+def test_page_markers_head_each_page():
+    """Each page is introduced by '=== page N ===', two blank lines before all but
+    the first."""
+    corrected = {1: ["one A", "one B"], 2: ["two A"], 3: ["three A"]}
+    out = assemble_text(corrected)
+    lines = out.split("\n")
+    first_ok = lines[0] == "=== page 1 ==="
+    # every marker after the first is preceded by exactly two blank lines
+    gaps_ok = True
+    for number in (2, 3):
+        marker = "=== page {0} ===".format(number)
+        index = lines.index(marker)
+        if not (lines[index-1] == "" and lines[index-2] == "" and lines[index-3] != ""):
+            gaps_ok = False
+    print(f"  first-has-no-leading-blank={first_ok}  two-blank-gaps={gaps_ok}")
+    marker_count = out.count("=== page ")
+    return first_ok and gaps_ok and marker_count == 3
 
 
 def main():

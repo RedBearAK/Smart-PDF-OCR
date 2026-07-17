@@ -105,6 +105,25 @@ recognition time is nearly flat in page pixels, because detection downsizes
 internally and recognition scales with the number of text lines, not megapixels --
 9.6 s at 3.7 Mpx against 9.8 s at 14.9 Mpx.
 
+## Page markers in the text output
+
+Each page in the corrected text dump is headed by a marker line:
+
+```
+=== page 1 ===
+GalaxSea Freight Forwarding
+...
+
+
+=== page 2 ===
+...
+```
+
+The first page's marker leads the file; every later page is preceded by two blank
+lines. This lets a reader -- or a downstream tool -- tell which page any line came
+from. The markers contain a space and the word "page", so they do not collide with
+the place-of-receipt (`City, ST`) or POL/POD (`XXX/YYY`) extraction patterns.
+
 ## Searchable PDF output
 
 By default the tool emits corrected text. `--pdf-out` additionally writes a

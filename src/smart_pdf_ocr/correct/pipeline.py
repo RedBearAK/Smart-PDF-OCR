@@ -220,10 +220,18 @@ def correct_document(page_results, conf_gate=0.90, profile=None, ascii_mode=MODE
 
 
 def assemble_text(corrected):
+    """Join corrected pages into one text dump, each headed by a page marker.
+
+    Every page is introduced by a ``=== page N ===`` line so a reader -- human or a
+    downstream tool -- can tell which page any line came from. Pages are separated by
+    two blank lines before the marker; the first page has no leading blank lines.
+    """
     chunks = []
     for page_number in sorted(corrected):
-        chunks.append("\n".join(corrected[page_number]))
-    return "\n\n".join(chunks)
+        marker = "=== page {0} ===".format(page_number)
+        body = "\n".join(corrected[page_number])
+        chunks.append(marker + "\n" + body)
+    return "\n\n\n".join(chunks)
 
 
 # End of file #
