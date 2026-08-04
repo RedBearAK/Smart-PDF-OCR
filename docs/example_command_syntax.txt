@@ -1,0 +1,7 @@
+smart-pdf-ocr --report \
+  --known-patterns known_patterns.txt \
+  --error-patterns error_patterns.txt \
+  --learn-profile galaxsea.json \
+  --review-out review.tsv \
+  --output corrected.txt \
+  --input 20260727150954.pdf --pdf-out 20260727150954_smartocr.pdf
