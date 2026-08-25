@@ -37,7 +37,8 @@ def _run(argv):
 
 
 def _cached_dump():
-    handle = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8")
+    handle = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8",
+                                         dir=tempfile.mkdtemp())
     handle.write('{"1": {"txts": ["GalaxSea Freight Forwarding"], "scores": [0.99]}}')
     handle.close()
     return handle.name
@@ -172,6 +173,71 @@ def test_timing_line_reports_the_run():
     return code == 0 and len(line) == 1 and "total" in line[0] and "correct" in line[0]
 
 
+def test_bare_run_creates_a_stem_prefixed_folder():
+    """No output flags: a <stem>_smartocr_files_<time> folder appears beside
+    the input, holding stem-prefixed corrected text and review file."""
+    import glob, shutil
+    dump = _cached_dump()
+    stem = os.path.splitext(os.path.basename(dump))[0]
+    code, err = _run(["--cached", dump])
+    folders = glob.glob(os.path.join(os.path.dirname(dump), stem + "_smartocr_files_*"))
+    ok = code == 0 and len(folders) == 1
+    inside = sorted(os.listdir(folders[0])) if folders else []
+    expected = [stem + "_corrected.txt", stem + "_review.tsv"]
+    print(f"  exit={code} folder={bool(folders)} inside={inside}")
+    for folder in folders:
+        shutil.rmtree(folder, ignore_errors=True)
+    os.unlink(dump)
+    return ok and inside == expected and ("outputs: " in err)
+
+
+def test_explicit_outputs_suppress_the_folder():
+    """When every artifact has an explicit path, no folder is created."""
+    import glob
+    dump = _cached_dump()
+    out = _fresh(".txt")
+    review = _fresh(".tsv")
+    code, _err = _run(["--cached", dump, "-o", out, "--review-out", review])
+    folders = glob.glob(os.path.join(os.path.dirname(dump), "*_smartocr_files_*"))
+    print(f"  exit={code} stray_folders={len(folders)}")
+    for path in (dump, out, review):
+        if os.path.exists(path):
+            os.unlink(path)
+    return code == 0 and not folders
+
+
+def test_stdout_dump_still_available():
+    """-o - dumps corrected text to stdout while other defaults still land."""
+    import io, glob, shutil
+    out_buffer = io.StringIO()
+    dump = _cached_dump()
+    with contextlib.redirect_stdout(out_buffer), contextlib.redirect_stderr(io.StringIO()):
+        try:
+            code = cli.main(["--cached", dump, "-o", "-"])
+        except SystemExit as exit_signal:
+            code = exit_signal.code if isinstance(exit_signal.code, int) else 2
+    text_ok = "=== page 1 ===" in out_buffer.getvalue()
+    folders = glob.glob(os.path.join(os.path.dirname(dump), "*_smartocr_files_*"))
+    print(f"  exit={code} stdout_has_markers={text_ok} folder={len(folders)}")
+    for folder in folders:
+        shutil.rmtree(folder, ignore_errors=True)
+    os.unlink(dump)
+    return code == 0 and text_ok and len(folders) == 1
+
+
+def test_output_dir_is_reusable_with_per_file_guards():
+    """--output-dir may exist; rerunning into it trips the per-file guard."""
+    import tempfile
+    dump = _cached_dump()
+    folder = tempfile.mkdtemp()
+    code_one, _err = _run(["--cached", dump, "--output-dir", folder])
+    code_two, err_two = _run(["--cached", dump, "--output-dir", folder])
+    print(f"  first={code_one} second={code_two}")
+    os.unlink(dump)
+    return (code_one == 0 and code_two == 2
+            and "already exists; pass --force" in err_two)
+
+
 def main():
     tests = [
         test_missing_input_file_is_a_usage_error,
@@ -186,6 +252,10 @@ def main():
         test_pdf_out_will_not_overwrite_the_input,
         test_two_outputs_to_one_path_refused,
         test_timing_line_reports_the_run,
+        test_bare_run_creates_a_stem_prefixed_folder,
+        test_explicit_outputs_suppress_the_folder,
+        test_stdout_dump_still_available,
+        test_output_dir_is_reusable_with_per_file_guards,
     ]
     score = 0
     for test in tests:

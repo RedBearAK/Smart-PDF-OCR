@@ -192,10 +192,36 @@ Lines the recognizer gave no box are left out rather than piled at the origin.
 
 ## Invoking it
 
-The document may be given positionally or with `-i/--input`:
+The document may be given positionally or with `-i/--input`. A bare run needs
+nothing else:
 
 ```
-smart-pdf-ocr invoices.pdf -o corrected.txt
+smart-pdf-ocr FILENAME.pdf
+```
+
+That creates a run folder BESIDE the input -- `FILENAME_smartocr_files_<HHMMSS>`
+(the scan names already carry the date, so the folder carries only the time) --
+holding every artifact prefixed with the document's own name:
+
+```
+FILENAME_corrected.txt      the corrected text (leads with its source line)
+FILENAME_review.tsv         the flagged-line review file
+FILENAME_smartocr.pdf       the searchable sandwich PDF
+```
+
+Nothing generic exists to collide between runs, the outputs of one document
+never mix with another's, and the folder is refused if it somehow already
+exists. The searchable PDF is defaulted only when the input is a real PDF and
+pikepdf is installed; otherwise it is skipped with a note, never an error.
+
+Explicit paths still win, per artifact -- an explicit `-o`, `--review-out` or
+`--pdf-out` lands exactly where stated and is never moved into the folder.
+`--output-dir DIR` redirects the whole folder (created if needed, reusable,
+with the usual per-file --force guards inside). `-o -` dumps the corrected
+text to stdout. The learned profile (`--learn-profile`) stays wherever it is
+pointed: it is a standing, accumulating file, not a per-run artifact.
+
+```
 smart-pdf-ocr -o corrected.txt --known-patterns known.txt -i invoices.pdf
 ```
 

@@ -1,48 +1,70 @@
-MANIFEST.txt -- sourcemark tarball
+MANIFEST.txt -- ocr_outdirs tarball
 Apply into: repo root (dev_beta)
-Apply after: overlap
+Apply after: sourcemark
+(Tarballs for this tool are named ocr_*.tgz from here on.)
 
 FILES (full drop-in replacements)
 
-  README.md                              (modified: page-markers section)
-  src/smart_pdf_ocr/cli.py               (modified: 2 lines)
-  src/smart_pdf_ocr/correct/pipeline.py  (modified: assemble_text)
-  tests/test_pipeline.py                 (modified)
+  README.md                   (modified: Invoking it section)
+  src/smart_pdf_ocr/cli.py    (modified)
+  tests/test_cli_paths.py     (modified)
 
 WHAT CHANGES
 
-  The corrected text dump now leads with a provenance line naming the
-  document it came from:
+  Default outputs move into a per-run, per-document folder. A bare
 
-      === source: 20260823141532.pdf ===
-      === page 1 ===
-      ...
+      smart-pdf-ocr FILENAME.pdf
 
-  assemble_text() gains an optional source parameter (default "", old
-  behavior exactly); cli passes the basename of --input (or --cached as
-  the fallback). Downstream tools can name their outputs after the
-  document instead of after the generic dump filename -- output-file
-  collisions between runs were traced to exactly that. Parsers that split
-  on the page markers see the source line as invisible preamble:
-  gxy_charges_sheet already skips it by construction, and nothing else
-  consumes corrected text.
+  now creates FILENAME_smartocr_files_<HHMMSS>/ BESIDE the input (time-only
+  stamp: the scan names already carry the date) holding
+
+      FILENAME_corrected.txt
+      FILENAME_review.tsv
+      FILENAME_smartocr.pdf
+
+  replacing the old defaults (corrected text to stdout, no review file, no
+  PDF) that pushed every path onto the command line and produced generic
+  colliding names. Rules:
+
+  - Explicit -o / --review-out / --pdf-out win per artifact, land exactly
+    where stated, never relocated into the folder. All three explicit ->
+    no folder at all.
+  - --output-dir DIR redirects the folder (created if needed, reusable;
+    the per-file --force overwrite guards still apply inside).
+  - -o -  dumps corrected text to stdout (the old no-flag behavior).
+  - The auto folder is refused if it already exists; a preflight failure
+    removes the just-created empty folder again.
+  - The searchable PDF defaults on only for a real PDF input with pikepdf
+    present; otherwise "searchable PDF skipped: pikepdf not installed" and
+    the run proceeds.
+  - --learn-profile is untouched: a standing, accumulating file, not a
+    per-run artifact. --cached runs default the text and review files
+    (named after the cache) but never a PDF (nothing to sandwich).
+  - Defaults resolve BEFORE the fail-early preflight, so defaulted paths
+    inherit every existing guard (overwrite refusal, input-collision,
+    duplicate-target) unchanged.
+
+  The old GalaxSea runbook invocation keeps working verbatim; it can now
+  shrink to:
+
+      smart-pdf-ocr --report \
+        --known-patterns known_patterns.txt \
+        --error-patterns error_patterns.txt \
+        --learn-profile galaxsea.json \
+        FILENAME.pdf
+
+  and gxy-charges-sheet pointed at the folder's corrected file drops its
+  timestamped workbook alongside, named from the source line.
 
 TESTS
 
-  test_pipeline.py: new test_source_line_leads_the_dump (source line
-  first, page 1 marker second, sourceless output byte-identical to
-  before). Also registers the pre-existing
-  test_page_markers_head_each_page in main() -- it was defined but absent
-  from the standalone SCORE list, so it ran under pytest discovery only.
-  Standalone: 6/6. Full suite: 127 passed, pyflakes clean. End-to-end:
-  real run shows the source line leading corrected output.
-
-COMPANION
-
-  gxy_charges_sheet.py (delivered alongside, lives in python_scripts/, not
-  this repo) reads the source line and names its default output
-  <source-stem>_charges_<yymmdd>_<hhmmss>.xlsx beside the input; corrected
-  files predating this tarball fall back to the input file's stem, still
-  timestamped. Explicit -o is unchanged.
+  test_cli_paths.py +4: bare cached run creates the stem-prefixed folder
+  with stem-prefixed contents; all-explicit outputs create no folder;
+  -o - dumps markers to stdout while other defaults still land;
+  --output-dir is reusable and a rerun into it trips the per-file guard.
+  Also: _cached_dump now isolates each dump in its own tempdir, so tests
+  stop littering a shared /tmp with run folders. Standalone 16/16; full
+  suite 131 passed, pyflakes clean. End-to-end verified from a foreign
+  working directory, chained into gxy_charges_sheet.
 
 # End of file #

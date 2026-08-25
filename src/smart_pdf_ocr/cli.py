@@ -330,7 +330,12 @@ def build_parser():
                         help="document to process (pdf / bundle / image)")
     parser.add_argument("-i", "--input", dest="input_flag",
                         help="the same document, as a flag, so it may appear in any order")
-    parser.add_argument("-o", "--output", help="write corrected text here (default: stdout)")
+    parser.add_argument("-o", "--output",
+                        help="write corrected text here; '-' dumps to stdout "
+                             "(default: <stem>_corrected.txt in the run folder)")
+    parser.add_argument("--output-dir",
+                        help="folder for defaulted outputs (default: a new "
+                             "<stem>_smartocr_files_<HHMMSS> folder beside the input)")
     parser.add_argument("--cached", help="use a saved OCR JSON dump instead of recognizing")
     parser.add_argument("--dpi", default="auto",
                         help="rasterization DPI for real PDFs, or 'auto' for the scan's "
@@ -377,6 +382,71 @@ def main(argv=None):
         return 1
 
 
+def _resolve_default_outputs(args):
+    """Fill unset output paths with stem-prefixed names in a per-run folder.
+
+    The old default -- every artifact named generically, landing wherever the
+    shell happened to be -- made runs collide with each other. Now a bare run
+    creates <stem>_smartocr_files_<HHMMSS> BESIDE the input (the scan names
+    already carry the date, so the folder carries only the time) holding
+    <stem>_corrected.txt, <stem>_review.tsv and <stem>_smartocr.pdf. An
+    explicit path for any artifact wins for that artifact and is never moved
+    into the folder; --output-dir redirects the folder itself (created if
+    needed, reusable); -o - keeps the stdout text dump. The searchable PDF is
+    defaulted only when there is a real PDF input to sandwich and pikepdf is
+    present -- otherwise it is skipped with a note, never an error.
+
+    Returns (folder_created_or_None, problems, notes). The folder is created
+    here so the preflight can validate the files inside it; if the preflight
+    then fails, the caller removes the empty folder again.
+    """
+    from smart_pdf_ocr.review.pdf_out import is_available as pdf_possible
+
+    problems = []
+    notes = []
+    source = args.input or args.cached
+    if not source or not os.path.isfile(source):
+        # A bad input path is the preflight's problem to name; defaulting
+        # outputs beside it would only bury that message under this one.
+        return None, problems, notes
+    stdout_dump = args.output == "-"
+    if stdout_dump:
+        args.output = None
+    want_text = args.output is None and not stdout_dump
+    want_review = args.review_out is None
+    sandwich_ok = (args.pdf_out is None and args.input and not args.cached
+                   and sniff(args.input) == "pdf")
+    want_pdf = sandwich_ok and pdf_possible()
+    if sandwich_ok and not pdf_possible():
+        notes.append("searchable PDF skipped: pikepdf not installed")
+
+    if not (want_text or want_review or want_pdf):
+        return None, problems, notes
+
+    stem = os.path.splitext(os.path.basename(source))[0]
+    created = None
+    if args.output_dir:
+        folder = args.output_dir
+        os.makedirs(folder, exist_ok=True)
+    else:
+        beside = os.path.dirname(os.path.abspath(source))
+        folder = os.path.join(
+            beside, "{0}_smartocr_files_{1}".format(stem, time.strftime("%H%M%S")))
+        if os.path.exists(folder):
+            problems.append("run folder already exists: {0}".format(folder))
+            return None, problems, notes
+        os.makedirs(folder)
+        created = folder
+    if want_text:
+        args.output = os.path.join(folder, stem + "_corrected.txt")
+    if want_review:
+        args.review_out = os.path.join(folder, stem + "_review.tsv")
+    if want_pdf:
+        args.pdf_out = os.path.join(folder, stem + "_smartocr.pdf")
+    notes.append("outputs: " + folder)
+    return created, problems, notes
+
+
 def _run(argv=None):
     started = time.monotonic()
     parser = build_parser()
@@ -387,11 +457,16 @@ def _run(argv=None):
     if not args.input and not args.cached:
         parser.error("provide an input document or --cached OCR dump")
 
-    problems = _path_problems(args)
+    created_folder, problems, notes = _resolve_default_outputs(args)
+    problems += _path_problems(args)
     if problems:
         for problem in problems:
             print("error: " + problem, file=sys.stderr)
+        if created_folder:
+            shutil.rmtree(created_folder, ignore_errors=True)
         return 2
+    for note in notes:
+        print(note, file=sys.stderr)
 
     requested = _requested_dpi(parser, str(args.dpi))
     args.workers = _requested_workers(parser, str(args.workers))
