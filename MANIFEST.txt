@@ -1,0 +1,77 @@
+MANIFEST.txt -- widthfit tarball
+Apply into: ~/DropBox/Tech_scripts/Smart-PDF-OCR/  (repo root)
+Apply after: overwrite_guard (this is the next tarball in the sequence)
+
+FILES (full drop-in replacements)
+
+  src/smart_pdf_ocr/review/pdf_out.py
+  tests/test_pdf_out.py
+
+WHAT CHANGES
+
+  Two placement defects in the invisible text layer, found when a
+  pdf-manipulator dump of the Aug 23 batch came back reading
+  `ForwardTinOgTAL` and `PØase pay this am$2o5u6.n0t0:`.
+
+  1. Runs are now WIDTH-FITTED to their recognizer boxes. Base font
+     Helvetica -> Courier (fixed 600/1000 em advance makes natural width
+     exact arithmetic), plus a per-line Tz horizontal scale so each run
+     spans exactly its box. Previously a run's natural width routinely
+     overran the box and spilled into the neighboring column; extractors
+     that sort characters by x-position then interleaved the two columns
+     character by character. Verified clean against pdfplumber (default
+     char-sorting mode), pypdf, and pypdfium2. Bonus: selection now covers
+     exactly the pixels a line annotates.
+
+  2. The font dictionary now declares /Encoding /WinAnsiEncoding, and the
+     stream is encoded cp1252 to match. Without it, extractors fell back to
+     Adobe StandardEncoding, remapping bytes: e-acute (0xE9) read back as a
+     slashed O (`Péase` -> `PØase`) and even the ASCII apostrophe (0x27) as
+     a curly quote (`Addt'l` -> `Addt’l`). Side benefit of cp1252 over the
+     old latin-1: typographic quotes/dashes/bullets in corrected text now
+     encode instead of becoming `?`.
+
+  Also: the layer's stream is wrapped in q/Q, so render mode 3 and the Tz
+  scale cannot leak into content appended after it (the old stream left
+  invisible-mode set page-wide for any later writer).
+
+  No interface changes. pages_from(), write_searchable_pdf() signatures,
+  file-size behavior (+~400 bytes/page of text), and the pikepdf-only
+  optional dependency are all unchanged.
+
+TESTS
+
+  tests/test_pdf_out.py: the five existing tests unchanged, plus three new:
+    test_every_glyph_stays_inside_its_box
+    test_position_sorted_extraction_does_not_interleave   (simulates the
+        pdfminer-family char-sort that shredded the Aug 23 dump)
+    test_declared_encoding_round_trips_non_ascii
+  All three verified to FAIL against the old module behavior and PASS
+  against the new. Standalone run: 8/8.
+
+MANUAL STEP -- pattern files (do not ship in a tarball; they are yours)
+
+  error_patterns.txt   add line:  Addt'I
+  known_patterns.txt   add line:  Addt'l Handling
+
+  Rationale: `Addt'I` (capital I) appeared 5x in run 404's corrected output
+  vs the correct `Addt'l` once -- clears the recurrence bar. It is
+  never-correct, and `Addt'l` sits 1 edit away on a 6-char term, so it
+  resolves unambiguously under existing rules. Apostrophes are ASCII 0x27
+  in the corrected output (verified by od); enter them as plain '.
+  Caveat: if the corrector's tokenizer splits on apostrophes these entries
+  will not fire -- confirm on the next run and revisit if so.
+
+  Watch-list only (once or twice each, per the lean-file principle):
+  `Péase`, `paymént` (e-acute intrusions), stray CJK marks. If they recur,
+  a structure guard for non-ASCII letters embedded in otherwise-ASCII words
+  fits better than per-word entries.
+
+NOTE ON EXISTING OUTPUT
+
+  Already-generated searchable PDFs keep the old layer; re-run the tool to
+  regenerate. The complementary pdf-manipulator fix (stream-order
+  extraction; see pdf-manipulator-extraction-handoff.md) covers old PDFs
+  without regeneration.
+
+# End of file #
