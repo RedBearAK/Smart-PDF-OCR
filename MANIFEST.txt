@@ -1,45 +1,23 @@
-MANIFEST.txt -- timing tarball
+MANIFEST.txt -- hourglass tarball
 Apply into: repo root (dev_beta)
-Apply after: memprobe
+Apply after: timing
 
-FILES (full drop-in replacements)
+FILES (full drop-in replacement)
 
-  README.md                   (modified: one sentence in the parallel section)
-  src/smart_pdf_ocr/cli.py    (modified)
-  tests/test_cli_paths.py     (modified: one new test)
+  src/smart_pdf_ocr/cli.py
 
 WHAT CHANGES
 
-  Every run now ends with a timing line on stderr, printed just before the
-  corrections count:
+  The pool's progress line now reads "pages recognized 61/82" instead of
+  "recognizing page 61/82". A pool finishes pages in whatever order they
+  complete, so the counter is an hourglass filling, not a cursor on a page;
+  the old phrasing implied a position that no longer exists. The sequential
+  path keeps "recognizing page X/Y" -- there it genuinely is on that page --
+  and rasterization keeps "rasterizing page X/Y" for the same reason. The
+  _progress helper takes a full label now instead of a verb, so word order
+  is free.
 
-      timing: rasterize 11.2s, recognize 96.4s (1.2s/page), correct 0.9s, total 113.1s
-
-  Phases that did not run are simply absent -- a --cached run reports only
-  correct and total. The per-page recognition rate is the portable number:
-  it holds its meaning across documents of different lengths, so machines
-  and --workers sweeps compare directly. The clock is time.monotonic(),
-  started at the top of _run; total therefore includes everything, including
-  --pdf-out writing, while the named phases cover the three big blocks.
-
-  No flags, no behavior changes otherwise.
-
-TESTS
-
-  test_cli_paths.py gains test_timing_line_reports_the_run: a cached run
-  must end with exactly one timing line naming correct and total. Full
-  suite: 122 passed, pyflakes clean. End-to-end verified in both modes:
-
-      timing: rasterize 0.1s, recognize 9.7s (2.4s/page), correct 0.4s, total 10.2s
-      timing: correct 0.0s, total 0.0s        (--cached)
-
-SUGGESTED FIRST USE
-
-  One sweep answers the remaining performance question with numbers:
-
-      for n in 1 2 4 6; do smart-pdf-ocr doc.pdf -o /tmp/t$n.txt --workers $n --force; done
-
-  and compare the s/page figures. If 6 beats 4 on the M3, the core bound
-  (cores // 2) is worth revisiting; if 4 and 6 tie, it is confirmed.
+  Nothing else changes; no test updates needed (no test pins the phrasing).
+  Suite after application: 122 passed, pyflakes clean.
 
 # End of file #

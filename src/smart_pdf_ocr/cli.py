@@ -120,18 +120,24 @@ def _path_problems(args):
     return problems
 
 
-def _progress(done, total, quiet, verb="recognizing"):
-    """A multi-minute run should not look like a hang."""
+def _progress(done, total, quiet, label="recognizing page"):
+    """A multi-minute run should not look like a hang.
+
+    The label is the whole phrase before the counter. Sequential phases read
+    naturally as "recognizing page 12/82" -- the run is genuinely on that page.
+    The pool finishes pages in whatever order they complete, so its label is
+    "pages recognized": an hourglass filling, not a cursor moving.
+    """
     if quiet:
         return
     if sys.stderr.isatty():
-        sys.stderr.write("\r  %s page %d/%d" % (verb, done, total))
+        sys.stderr.write("\r  %s %d/%d" % (label, done, total))
         if done == total:
             sys.stderr.write("\n")
         sys.stderr.flush()
         return
     if done == total or done % 10 == 0:
-        print("  %s page %d/%d" % (verb, done, total), file=sys.stderr)
+        print("  %s %d/%d" % (label, done, total), file=sys.stderr)
 
 
 def _recognize_all(image_paths, quiet=False):
@@ -155,7 +161,7 @@ def _recognize_pool(image_paths, workers, quiet=False):
               file=sys.stderr)
 
     def tick(done, total):
-        _progress(done, total, quiet)
+        _progress(done, total, quiet, label="pages recognized")
 
     return recognize_parallel(image_paths, workers, progress=tick)
 
@@ -206,7 +212,7 @@ def _load_pages(args, timing):
         return load_cached_ocr(args.cached), None, ()
 
     def raster_tick(done, total):
-        _progress(done, total, args.quiet, verb="rasterizing")
+        _progress(done, total, args.quiet, label="rasterizing page")
 
     mark = time.monotonic()
     image_paths, workdir = enumerate_pages(args.input, dpi=args.dpi, progress=raster_tick)
