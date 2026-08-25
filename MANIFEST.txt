@@ -1,70 +1,61 @@
-MANIFEST.txt -- ocr_outdirs tarball
+MANIFEST.txt -- ocr_support tarball
 Apply into: repo root (dev_beta)
-Apply after: sourcemark
-(Tarballs for this tool are named ocr_*.tgz from here on.)
+Apply after: ocr_outdirs
 
 FILES (full drop-in replacements)
 
   README.md                   (modified: Invoking it section)
   src/smart_pdf_ocr/cli.py    (modified)
-  tests/test_cli_paths.py     (modified)
+  tests/test_cli_paths.py     (modified: four new tests)
 
 WHAT CHANGES
 
-  Default outputs move into a per-run, per-document folder. A bare
+  The input-side mirror of ocr_outdirs: the standing files leave the
+  invocation. When --known-patterns / --error-patterns / --profile /
+  --learn-profile are omitted, a _smartocr_support folder BESIDE the input
+  (leading underscore, sorts above the documents; --support-dir overrides)
+  supplies:
+
+      known_patterns.txt
+      error_patterns.txt
+      <anything>.json         the vendor profile
+
+  Rules:
+
+  - Announced, never silent:
+      support: .../_smartocr_support (known_patterns.txt, error_patterns.txt,
+               profile galaxsea.json (load+update))
+  - An explicit flag wins for that file, exactly as on the output side.
+  - A lone .json becomes BOTH ends of the profile round-trip: loaded
+    before the run and updated by learning after it, so canonicals
+    compound across runs (the old runbook wrote galaxsea.json every run
+    but never loaded it back). Two or more .json files are refused BY
+    NAME with the flag to pass -- no guessing.
+  - A missing auto folder is an unconfigured folder, not an error; a
+    missing --support-dir is an error.
+  - Round-trip exemption in the overwrite guard: --learn-profile pointing
+    at the same file as --profile no longer demands --force -- updating a
+    file you are also loading is declared intent, like --review-in with
+    --review-out. (Standing friction fixed: repeat --learn-profile runs
+    previously exited 2 without --force.)
+
+  The GalaxSea workflow becomes: put known_patterns.txt,
+  error_patterns.txt and galaxsea.json in _smartocr_support once; the
+  user drops PDFs in the folder and runs
 
       smart-pdf-ocr FILENAME.pdf
 
-  now creates FILENAME_smartocr_files_<HHMMSS>/ BESIDE the input (time-only
-  stamp: the scan names already carry the date) holding
-
-      FILENAME_corrected.txt
-      FILENAME_review.tsv
-      FILENAME_smartocr.pdf
-
-  replacing the old defaults (corrected text to stdout, no review file, no
-  PDF) that pushed every path onto the command line and produced generic
-  colliding names. Rules:
-
-  - Explicit -o / --review-out / --pdf-out win per artifact, land exactly
-    where stated, never relocated into the folder. All three explicit ->
-    no folder at all.
-  - --output-dir DIR redirects the folder (created if needed, reusable;
-    the per-file --force overwrite guards still apply inside).
-  - -o -  dumps corrected text to stdout (the old no-flag behavior).
-  - The auto folder is refused if it already exists; a preflight failure
-    removes the just-created empty folder again.
-  - The searchable PDF defaults on only for a real PDF input with pikepdf
-    present; otherwise "searchable PDF skipped: pikepdf not installed" and
-    the run proceeds.
-  - --learn-profile is untouched: a standing, accumulating file, not a
-    per-run artifact. --cached runs default the text and review files
-    (named after the cache) but never a PDF (nothing to sandwich).
-  - Defaults resolve BEFORE the fail-early preflight, so defaulted paths
-    inherit every existing guard (overwrite refusal, input-collision,
-    duplicate-target) unchanged.
-
-  The old GalaxSea runbook invocation keeps working verbatim; it can now
-  shrink to:
-
-      smart-pdf-ocr --report \
-        --known-patterns known_patterns.txt \
-        --error-patterns error_patterns.txt \
-        --learn-profile galaxsea.json \
-        FILENAME.pdf
-
-  and gxy-charges-sheet pointed at the folder's corrected file drops its
-  timestamped workbook alongside, named from the source line.
+  (--report to taste). The working folder holds nothing but documents,
+  their run folders, and the support folder.
 
 TESTS
 
-  test_cli_paths.py +4: bare cached run creates the stem-prefixed folder
-  with stem-prefixed contents; all-explicit outputs create no folder;
-  -o - dumps markers to stdout while other defaults still land;
-  --output-dir is reusable and a rerun into it trips the per-file guard.
-  Also: _cached_dump now isolates each dump in its own tempdir, so tests
-  stop littering a shared /tmp with run folders. Standalone 16/16; full
-  suite 131 passed, pyflakes clean. End-to-end verified from a foreign
-  working directory, chained into gxy_charges_sheet.
+  test_cli_paths.py +4: auto-load announces all three and wires them
+  (error-pattern count proves plumbing) with the profile round-tripping
+  sans --force; two JSONs refused naming both; an explicit
+  --error-patterns beats the folder copy; a missing --support-dir errors.
+  Standalone 20/20; full suite 135 passed, pyflakes clean. End-to-end
+  from a foreign CWD: support announced, profile grew from 0 to 1
+  clusters in place, outputs filed in the run folder.
 
 # End of file #

@@ -121,8 +121,14 @@ def _path_problems(args):
                             .format(seen[path], label, path))
             continue
         seen[path] = label
-        # An existing output is overwritten only with --force.
+        # An existing output is overwritten only with --force -- except the
+        # declared profile round-trip: a --learn-profile that is also the
+        # loaded --profile is being updated on purpose, like a review file
+        # flowing back in through --review-in.
         if os.path.exists(path) and not args.force:
+            if (label == "--learn-profile" and args.profile
+                    and _same_file(path, args.profile)):
+                continue
             problems.append("{0}: {1} already exists; pass --force to overwrite"
                             .format(label, path))
     return problems
@@ -333,6 +339,9 @@ def build_parser():
     parser.add_argument("-o", "--output",
                         help="write corrected text here; '-' dumps to stdout "
                              "(default: <stem>_corrected.txt in the run folder)")
+    parser.add_argument("--support-dir",
+                        help="folder of standing support files to auto-load "
+                             "(default: _smartocr_support beside the input)")
     parser.add_argument("--output-dir",
                         help="folder for defaulted outputs (default: a new "
                              "<stem>_smartocr_files_<HHMMSS> folder beside the input)")
@@ -447,6 +456,70 @@ def _resolve_default_outputs(args):
     return created, problems, notes
 
 
+def _resolve_support(args):
+    """Auto-load standing support files from a folder beside the input.
+
+    The working folder should hold nothing but the documents: the always-there
+    files -- known patterns, error patterns, the vendor profile -- live in a
+    _smartocr_support subfolder (leading underscore so it sorts above the
+    PDFs), found beside the input like every other default, or wherever
+    --support-dir points. An explicit flag wins per file, exactly as on the
+    output side. What was loaded is announced; nothing is ever loaded
+    silently.
+
+    A lone .json in the folder is the vendor profile and becomes BOTH ends of
+    the round-trip: loaded before the run and updated by learning after it,
+    so it compounds across runs. Two or more .json files are refused by name
+    rather than guessed between. A missing auto folder is simply an
+    unconfigured folder; a missing --support-dir is an error.
+    """
+    problems = []
+    notes = []
+    source = args.input or args.cached
+    if not source or not os.path.isfile(source):
+        return problems, notes
+    if args.support_dir:
+        folder = args.support_dir
+        if not os.path.isdir(folder):
+            problems.append("--support-dir: {0} is not a folder".format(folder))
+            return problems, notes
+    else:
+        folder = os.path.join(os.path.dirname(os.path.abspath(source)),
+                              "_smartocr_support")
+        if not os.path.isdir(folder):
+            return problems, notes
+
+    loaded = []
+    for attribute, filename in (("known_patterns", "known_patterns.txt"),
+                                ("error_patterns", "error_patterns.txt")):
+        path = os.path.join(folder, filename)
+        if getattr(args, attribute) is None and os.path.isfile(path):
+            setattr(args, attribute, path)
+            loaded.append(filename)
+
+    if args.profile is None or args.learn_profile is None:
+        candidates = sorted(name for name in os.listdir(folder)
+                            if name.lower().endswith(".json"))
+        if len(candidates) > 1:
+            problems.append("support folder holds {0} profile JSONs ({1}); "
+                            "pass --profile / --learn-profile explicitly"
+                            .format(len(candidates), ", ".join(candidates)))
+        elif candidates:
+            path = os.path.join(folder, candidates[0])
+            duties = []
+            if args.profile is None:
+                args.profile = path
+                duties.append("load")
+            if args.learn_profile is None:
+                args.learn_profile = path
+                duties.append("update")
+            loaded.append("profile {0} ({1})".format(candidates[0], "+".join(duties)))
+
+    if loaded:
+        notes.append("support: {0} ({1})".format(folder, ", ".join(loaded)))
+    return problems, notes
+
+
 def _run(argv=None):
     started = time.monotonic()
     parser = build_parser()
@@ -457,7 +530,10 @@ def _run(argv=None):
     if not args.input and not args.cached:
         parser.error("provide an input document or --cached OCR dump")
 
+    support_problems, support_notes = _resolve_support(args)
     created_folder, problems, notes = _resolve_default_outputs(args)
+    problems = support_problems + problems
+    notes = support_notes + notes
     problems += _path_problems(args)
     if problems:
         for problem in problems:

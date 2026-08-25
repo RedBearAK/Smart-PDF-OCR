@@ -238,6 +238,67 @@ def test_output_dir_is_reusable_with_per_file_guards():
             and "already exists; pass --force" in err_two)
 
 
+def _support_setup():
+    """A dump in its own folder, with a populated _smartocr_support beside it."""
+    dump = _cached_dump()
+    folder = os.path.join(os.path.dirname(dump), "_smartocr_support")
+    os.makedirs(folder)
+    with open(os.path.join(folder, "known_patterns.txt"), "w", encoding="utf-8") as handle:
+        handle.write("GalaxSea\n")
+    with open(os.path.join(folder, "error_patterns.txt"), "w", encoding="utf-8") as handle:
+        handle.write("WORLOWIDE\n")
+    with open(os.path.join(folder, "galaxsea.json"), "w", encoding="utf-8") as handle:
+        handle.write('{"clusters": {}}')
+    return dump, folder
+
+
+def test_support_folder_auto_loads_everything():
+    """Patterns and the profile are found beside the input and announced;
+    the profile round-trips (load + update) without --force."""
+    dump, folder = _support_setup()
+    code, err = _run(["--cached", dump, "-o", "-"])
+    support_line = [line for line in err.splitlines() if line.startswith("support: ")]
+    print(f"  exit={code}  {support_line}")
+    ok = (code == 0 and len(support_line) == 1
+          and "known_patterns.txt" in support_line[0]
+          and "error_patterns.txt" in support_line[0]
+          and "profile galaxsea.json (load+update)" in support_line[0]
+          and "error patterns: 1 loaded" in err)
+    return ok
+
+
+def test_support_two_profiles_are_refused_by_name():
+    """Two candidate JSONs: the tool names both and demands the flag."""
+    dump, folder = _support_setup()
+    with open(os.path.join(folder, "other.json"), "w", encoding="utf-8") as handle:
+        handle.write('{"clusters": {}}')
+    code, err = _run(["--cached", dump, "-o", "-"])
+    print(f"  exit={code}")
+    return (code == 2 and "galaxsea.json" in err and "other.json" in err
+            and "--profile" in err)
+
+
+def test_explicit_flag_beats_support_file():
+    """An explicit --error-patterns wins over the support folder's copy."""
+    dump, folder = _support_setup()
+    own = _fresh(".txt")
+    with open(own, "w", encoding="utf-8") as handle:
+        handle.write("WORLOWIDE\nWORIDWIDE\n")
+    code, err = _run(["--cached", dump, "-o", "-", "--error-patterns", own])
+    print(f"  exit={code}")
+    os.unlink(own)
+    return code == 0 and "error patterns: 2 loaded" in err
+
+
+def test_missing_explicit_support_dir_is_an_error():
+    """--support-dir names a place; the place must exist."""
+    dump = _cached_dump()
+    code, err = _run(["--cached", dump, "-o", "-", "--support-dir", "/nonexistent_support"])
+    print(f"  exit={code}")
+    os.unlink(dump)
+    return code == 2 and "is not a folder" in err
+
+
 def main():
     tests = [
         test_missing_input_file_is_a_usage_error,
@@ -256,6 +317,10 @@ def main():
         test_explicit_outputs_suppress_the_folder,
         test_stdout_dump_still_available,
         test_output_dir_is_reusable_with_per_file_guards,
+        test_support_folder_auto_loads_everything,
+        test_support_two_profiles_are_refused_by_name,
+        test_explicit_flag_beats_support_file,
+        test_missing_explicit_support_dir_is_an_error,
     ]
     score = 0
     for test in tests:

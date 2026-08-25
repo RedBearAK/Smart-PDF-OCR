@@ -214,6 +214,18 @@ never mix with another's, and the folder is refused if it somehow already
 exists. The searchable PDF is defaulted only when the input is a real PDF and
 pikepdf is installed; otherwise it is skipped with a note, never an error.
 
+The standing files move out of the invocation the same way. When the flags are
+omitted, a ``_smartocr_support`` folder beside the input (leading underscore, so
+it sorts above the documents) supplies ``known_patterns.txt``,
+``error_patterns.txt``, and the vendor profile -- a lone ``.json`` there is
+loaded before the run AND updated by learning after it, so it compounds across
+runs; two or more are refused by name rather than guessed between. What was
+loaded is announced on stderr; an explicit flag wins per file;
+``--support-dir DIR`` points somewhere else. A working folder therefore needs
+to hold nothing but the PDFs: drop a document, run
+``smart-pdf-ocr FILENAME.pdf``, and everything standing is found and
+everything produced is filed.
+
 Explicit paths still win, per artifact -- an explicit `-o`, `--review-out` or
 `--pdf-out` lands exactly where stated and is never moved into the folder.
 `--output-dir DIR` redirects the whole folder (created if needed, reusable,
