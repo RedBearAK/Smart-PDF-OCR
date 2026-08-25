@@ -219,19 +219,28 @@ def correct_document(page_results, conf_gate=0.90, profile=None, ascii_mode=MODE
     return corrected, report, diagnostics
 
 
-def assemble_text(corrected):
+def assemble_text(corrected, source=""):
     """Join corrected pages into one text dump, each headed by a page marker.
 
     Every page is introduced by a ``=== page N ===`` line so a reader -- human or a
     downstream tool -- can tell which page any line came from. Pages are separated by
     two blank lines before the marker; the first page has no leading blank lines.
+
+    When ``source`` is given (the input file's name), a ``=== source: <name> ===``
+    line leads the whole dump, so a downstream tool can name its own outputs after
+    the document instead of after the generic dump file -- collisions between runs
+    were traced to exactly that. Parsers that split on the page markers see the
+    source line as preamble and are unaffected.
     """
     chunks = []
     for page_number in sorted(corrected):
         marker = "=== page {0} ===".format(page_number)
         body = "\n".join(corrected[page_number])
         chunks.append(marker + "\n" + body)
-    return "\n\n\n".join(chunks)
+    joined = "\n\n\n".join(chunks)
+    if source:
+        return "=== source: {0} ===\n".format(source) + joined
+    return joined
 
 
 # End of file #

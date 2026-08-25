@@ -89,12 +89,28 @@ def test_page_markers_head_each_page():
     return first_ok and gaps_ok and marker_count == 3
 
 
+def test_source_line_leads_the_dump():
+    """With a source name, '=== source: <name> ===' is the first line; without
+    one, the dump starts at page 1 exactly as before."""
+    corrected = {1: ["alpha"], 2: ["beta"]}
+    stamped = assemble_text(corrected, source="20260823141532.pdf")
+    plain = assemble_text(corrected)
+    lines = stamped.split("\n")
+    first_ok = lines[0] == "=== source: 20260823141532.pdf ==="
+    second_ok = lines[1] == "=== page 1 ==="
+    plain_ok = plain.split("\n")[0] == "=== page 1 ==="
+    print(f"  first={first_ok} page-follows={second_ok} plain-unchanged={plain_ok}")
+    return first_ok and second_ok and plain_ok
+
+
 def main():
     tests = [
         test_small_cluster_declares_no_consensus,
         test_sufficient_cluster_corrects_and_votes,
         test_cosmetic_edit_rejected,
         test_numeric_line_survives_correction,
+        test_page_markers_head_each_page,
+        test_source_line_leads_the_dump,
     ]
     score = 0
     for test in tests:

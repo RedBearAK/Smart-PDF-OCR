@@ -158,8 +158,10 @@ GalaxSea Freight Forwarding
 ...
 ```
 
-The first page's marker leads the file; every later page is preceded by two blank
-lines. This lets a reader -- or a downstream tool -- tell which page any line came
+A ``=== source: <input file> ===`` line leads the file, naming the document the
+run came from, so downstream tools can name their outputs after the document
+instead of after a generic dump filename. The first page's marker follows
+immediately; every later page is preceded by two blank lines. This lets a reader -- or a downstream tool -- tell which page any line came
 from. The markers contain a space and the word "page", so they do not collide with
 the place-of-receipt (`City, ST`) or POL/POD (`XXX/YYY`) extraction patterns.
 

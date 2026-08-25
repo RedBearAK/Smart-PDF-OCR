@@ -480,7 +480,8 @@ def _run(argv=None):
             print("  stale rule (matched nothing): p{0} {1!r}".format(rule.page, rule.original),
                   file=sys.stderr)
 
-    text = assemble_text(corrected)
+    origin = os.path.basename(args.input or args.cached or "")
+    text = assemble_text(corrected, source=origin)
     if args.output:
         with open(args.output, "w", encoding="utf-8") as handle:
             handle.write(text + "\n")

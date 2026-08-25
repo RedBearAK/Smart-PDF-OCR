@@ -1,66 +1,48 @@
-MANIFEST.txt -- overlap tarball
+MANIFEST.txt -- sourcemark tarball
 Apply into: repo root (dev_beta)
-Apply after: hourglass
+Apply after: overlap
 
 FILES (full drop-in replacements)
 
-  README.md                                (modified)
-  src/smart_pdf_ocr/cli.py                 (modified)
-  src/smart_pdf_ocr/ingest/container.py    (modified)
-  src/smart_pdf_ocr/recognize/parallel.py  (modified)
-  tests/test_container.py                  (modified: two new tests)
-  tests/test_parallel.py                   (modified: two new tests)
+  README.md                              (modified: page-markers section)
+  src/smart_pdf_ocr/cli.py               (modified: 2 lines)
+  src/smart_pdf_ocr/correct/pipeline.py  (modified: assemble_text)
+  tests/test_pipeline.py                 (modified)
 
 WHAT CHANGES
 
-  Render-as-needed rasterization for pooled runs. Previously the parent
-  rendered every page (14.0s serial on the 82-page 400dpi batch), THEN the
-  pool recognized. Now, when the pool runs on a real PDF via pypdfium2,
-  rendering happens in a parent-side thread feeding the pool through a
-  queue: workers recognize page 1 while page 5 is still rendering, and the
-  entire render phase hides behind recognition except the first page. The
-  timing line reports it honestly:
+  The corrected text dump now leads with a provenance line naming the
+  document it came from:
 
-      timing: rasterize 13.8s overlapped, recognize 226s (2.8s/page), ...
+      === source: 20260823141532.pdf ===
+      === page 1 ===
+      ...
 
-  where "overlapped" means the seconds ran concurrently and total ~= the
-  recognize phase. Expected saving on the current batch: ~13 of the 14
-  rasterize seconds; the saving is proportional to page count, so it grows
-  with bigger batches.
-
-  Streaming applies ONLY to: pooled runs (workers > 1) + pdf input + the
-  pypdfium2 renderer. Everything else pre-renders exactly as before with
-  the "rasterizing page X/Y" counter: --workers 1 keeps the untouched
-  sequential reference path, bundles/images never rendered anyway, and the
-  poppler subprocess cannot stream. Sizing now reads the page count from
-  the PDF header (new container.page_count) instead of waiting for the
-  rendered files, which is why the workers line appears immediately.
-
-  Design note, for maintenance: the render thread is explicit, not the
-  pool's task-handler iterating a rendering generator. Pool's behavior when
-  a fed generator raises mid-iteration is undocumented; here a render
-  failure is recorded by the feeder, the channel closes, and the main
-  thread raises deterministically: "rasterization failed after N page(s):
-  <error>". A recognition failure still aborts naming its page.
-
-  container.py: the pdfium loop is refactored into iter_rendered_pages
-  (generator yielding (page_number, image_path)); _rasterize_with_pdfium
-  wraps it unchanged in behavior. page_count() and make_workdir() added.
-  parallel.py: pool loop factored into _pool_run, shared by
-  recognize_parallel (unchanged contract) and the new recognize_streaming
-  (returns results, rendered paths, producer wall time).
+  assemble_text() gains an optional source parameter (default "", old
+  behavior exactly); cli passes the basename of --input (or --cached as
+  the fallback). Downstream tools can name their outputs after the
+  document instead of after the generic dump filename -- output-file
+  collisions between runs were traced to exactly that. Parsers that split
+  on the page markers see the source line as invisible preamble:
+  gxy_charges_sheet already skips it by construction, and nothing else
+  consumes corrected text.
 
 TESTS
 
-  test_parallel.py +2: a lazy producer that creates files only when
-  iterated must match the sequential read (text and order) through a
-  2-worker pool; a producer that dies mid-render must abort naming how far
-  it got. test_container.py +2: page_count without rendering; the streaming
-  renderer yields numbered pages each on disk at yield time.
+  test_pipeline.py: new test_source_line_leads_the_dump (source line
+  first, page 1 marker second, sourceless output byte-identical to
+  before). Also registers the pre-existing
+  test_page_markers_head_each_page in main() -- it was defined but absent
+  from the standalone SCORE list, so it ran under pytest discovery only.
+  Standalone: 6/6. Full suite: 127 passed, pyflakes clean. End-to-end:
+  real run shows the source line leading corrected output.
 
-  Full suite: 126 passed, pyflakes clean. End-to-end verified: streaming
-  run (rasterize marked overlapped, --pdf-out working from streamed paths)
-  and --workers 1 fallback (pre-render counter intact) both byte-identical
-  to all prior builds' output.
+COMPANION
+
+  gxy_charges_sheet.py (delivered alongside, lives in python_scripts/, not
+  this repo) reads the source line and names its default output
+  <source-stem>_charges_<yymmdd>_<hhmmss>.xlsx beside the input; corrected
+  files predating this tarball fall back to the input file's stem, still
+  timestamped. Explicit -o is unchanged.
 
 # End of file #
