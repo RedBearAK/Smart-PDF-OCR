@@ -10,7 +10,23 @@ detected as a bundle from its bytes.
 
 import tempfile
 
-from smart_pdf_ocr.ingest.container import sniff
+from smart_pdf_ocr.ingest.container import sniff, page_count, iter_rendered_pages
+
+
+def _deps():
+    import importlib.util
+    return (importlib.util.find_spec("PIL") is not None
+            and importlib.util.find_spec("pypdfium2") is not None)
+
+
+def _small_pdf(pages=3):
+    from PIL import Image
+    frames = [Image.new("RGB", (200, 100), "white") for _ in range(pages)]
+    handle = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
+    handle.close()
+    frames[0].save(handle.name, "PDF", resolution=72.0, save_all=True,
+                   append_images=frames[1:])
+    return handle.name
 
 
 def _sniff_bytes(head):
@@ -48,12 +64,40 @@ def test_sniff_unknown():
     return kind == "unknown"
 
 
+def test_page_count_without_rendering():
+    """The page total is knowable before any page is rendered."""
+    if not _deps():
+        print("  skipped: pillow or pypdfium2 absent")
+        return True
+    pdf = _small_pdf(3)
+    count = page_count(pdf)
+    print(f"  page_count -> {count}")
+    return count == 3
+
+
+def test_rendered_pages_stream_in_order():
+    """The streaming renderer yields numbered pages, each on disk when yielded."""
+    if not _deps():
+        print("  skipped")
+        return True
+    import os
+    pdf = _small_pdf(3)
+    workdir = tempfile.mkdtemp()
+    seen = []
+    for number, path in iter_rendered_pages(pdf, workdir, 72):
+        seen.append((number, os.path.exists(path)))
+    print(f"  {seen}")
+    return seen == [(1, True), (2, True), (3, True)]
+
+
 def main():
     tests = [
         test_sniff_real_pdf,
         test_sniff_zip_bundle,
         test_sniff_bare_jpeg,
         test_sniff_unknown,
+        test_page_count_without_rendering,
+        test_rendered_pages_stream_in_order,
     ]
     score = 0
     for test in tests:

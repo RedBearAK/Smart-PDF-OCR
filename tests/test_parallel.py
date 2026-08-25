@@ -22,6 +22,7 @@ from smart_pdf_ocr.recognize.parallel import (
     per_worker_mb,
     available_memory_mb,
     recognize_parallel,
+    recognize_streaming,
     _linux_available_mb,
     _darwin_pressure_mb,
     _darwin_vm_stat_mb,
@@ -215,6 +216,57 @@ def test_failed_page_aborts_naming_the_page():
     return False
 
 
+def test_streaming_producer_feeds_the_pool():
+    """A lazy producer that renders on demand yields the same results.
+
+    The producer here creates each image file only when iterated -- the
+    streaming contract -- and the pool's output must match the sequential
+    read in text and page order, with the producer's paths and wall time
+    reported back.
+    """
+    if not _deps():
+        print("  skipped")
+        return True
+    from smart_pdf_ocr.recognize import rapidocr_backend
+    work = tempfile.mkdtemp()
+    eager = _tiny_pages(work, 3)
+    sequential = [rapidocr_backend.recognize_page(p, i + 1)
+                  for i, p in enumerate(eager)]
+
+    lazy_dir = tempfile.mkdtemp()
+
+    def producer():
+        for number, path in enumerate(_tiny_pages(lazy_dir, 3), 1):
+            yield number, path
+
+    pages, paths, seconds = recognize_streaming(producer(), 3, 2)
+    same = [p.texts for p in pages] == [p.texts for p in sequential]
+    ordered = [p.page_number for p in pages] == [1, 2, 3]
+    print(f"  same={same} ordered={ordered} paths={len(paths)} producer={seconds:.2f}s")
+    return same and ordered and len(paths) == 3 and seconds >= 0.0
+
+
+def test_streaming_render_failure_aborts_loudly():
+    """A producer that dies mid-render fails the run saying how far it got."""
+    if not _deps():
+        print("  skipped")
+        return True
+    work = tempfile.mkdtemp()
+    good = _tiny_pages(work, 1)
+
+    def producer():
+        yield 1, good[0]
+        raise ValueError("render exploded")
+
+    try:
+        recognize_streaming(producer(), 2, 1)
+    except RuntimeError as exc:
+        print(f"  {exc}")
+        return "rasterization failed after 1 page" in str(exc) and "render exploded" in str(exc)
+    print("  no error raised")
+    return False
+
+
 def main():
     tests = [
         test_meminfo_parse_reads_available,
@@ -231,6 +283,8 @@ def main():
         test_real_probe_reports_something_on_this_machine,
         test_pool_matches_the_sequential_path,
         test_failed_page_aborts_naming_the_page,
+        test_streaming_producer_feeds_the_pool,
+        test_streaming_render_failure_aborts_loudly,
     ]
     score = 0
     for test in tests:

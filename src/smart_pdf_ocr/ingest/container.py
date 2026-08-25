@@ -150,20 +150,43 @@ def _unpack_bundle(path, workdir):
     return [image_path for _number, image_path in order]
 
 
-def _rasterize_with_pdfium(path, workdir, dpi, progress=None):
+def page_count(path):
+    """How many pages a PDF holds, without rendering any. Zero without pdfium."""
+    if importlib.util.find_spec("pypdfium2") is None:
+        return 0
+    import pypdfium2 as pdfium
+    return len(pdfium.PdfDocument(path))
+
+
+def make_workdir():
+    return tempfile.mkdtemp(prefix="smart_pdf_ocr_")
+
+
+def iter_rendered_pages(path, workdir, dpi):
+    """Render one page at a time, yielding (page_number, image_path).
+
+    This is the streaming face of rasterization: a consumer that recognizes
+    pages while later pages are still rendering pulls from here, and rendering
+    stops the moment the consumer does. The batch face below wraps it.
+    """
     import pypdfium2 as pdfium
 
     document = pdfium.PdfDocument(path)
-    total = len(document)
     scale = dpi / 72.0
-    paths = []
     for index, page in enumerate(document):
         image = page.render(scale=scale).to_pil().convert("RGB")
         target = os.path.join(workdir, "page-%04d.jpg" % (index + 1))
         image.save(target, quality=95)
+        yield index + 1, target
+
+
+def _rasterize_with_pdfium(path, workdir, dpi, progress=None):
+    total = page_count(path)
+    paths = []
+    for number, target in iter_rendered_pages(path, workdir, dpi):
         paths.append(target)
         if progress is not None:
-            progress(index + 1, total)
+            progress(number, total)
     return paths
 
 
@@ -199,7 +222,7 @@ def enumerate_pages(path, dpi=None, progress=None):
     kind = sniff(path)
     if kind == "pdf" and dpi is None:
         dpi = resolve_dpi(path)[0]
-    workdir = tempfile.mkdtemp(prefix="smart_pdf_ocr_")
+    workdir = make_workdir()
     if kind == "bundle":
         return _unpack_bundle(path, workdir), workdir
     if kind == "pdf":

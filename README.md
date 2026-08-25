@@ -134,7 +134,11 @@ smart-pdf-ocr doc.pdf --workers 1    # the sequential path, exactly as before
 
 Workers are spawned processes, each with its own engine: a crash is isolated and
 aborts the run naming its page, and results always reassemble in page order
-before correction sees them, so nothing downstream changes at all. `--workers 1`
+before correction sees them, so nothing downstream changes at all. When the
+pool runs, rasterization streams: pages render in a parent-side thread just
+ahead of the workers consuming them, so the whole render phase hides behind
+recognition (the timing line marks it "overlapped") and the saving grows with
+the page count. A render failure mid-stream aborts naming how far it got. `--workers 1`
 takes the original sequential code path untouched. Either way the multi-second
 model load now announces itself instead of looking like a hang, and every run
 ends with a timing line -- rasterize, recognize (with a per-page rate), correct,

@@ -31,8 +31,16 @@ from smart_pdf_ocr.correct.disagree import DISAGREE_RATIO
 from smart_pdf_ocr.correct.pipeline import correct_document, assemble_text
 from smart_pdf_ocr.correct.normalize import MODE_EVIDENCE, MODE_FORCE, MODE_OFF
 from smart_pdf_ocr.recognize.backend import load_cached_ocr
-from smart_pdf_ocr.recognize.parallel import size_pool, recognize_parallel
-from smart_pdf_ocr.ingest.container import sniff, resolve_dpi, enumerate_pages, available_renderer
+from smart_pdf_ocr.recognize.parallel import size_pool, recognize_parallel, recognize_streaming
+from smart_pdf_ocr.ingest.container import (
+    sniff,
+    page_count,
+    resolve_dpi,
+    make_workdir,
+    enumerate_pages,
+    available_renderer,
+    iter_rendered_pages,
+)
 from smart_pdf_ocr.review.profile import counts_of, load_profile, save_profile, learn_profile
 from smart_pdf_ocr.correct.errors import contradictions, malformed, load_error_patterns
 from smart_pdf_ocr.correct.lexical import known_entries, known_tokens, load_patterns, make_plausibility
@@ -166,6 +174,76 @@ def _recognize_pool(image_paths, workers, quiet=False):
     return recognize_parallel(image_paths, workers, progress=tick)
 
 
+def _load_pages_streaming(args, timing, total, workers):
+    """Pooled recognition fed by render-as-needed rasterization.
+
+    Rendering runs in a parent-side thread while the pool recognizes, so the
+    whole rasterization phase hides behind recognition except the first page.
+    Only the pooled pdfium path streams; every other path pre-renders as
+    before, and --workers 1 keeps the untouched sequential reference.
+    """
+    if not rapidocr_backend.is_available():
+        raise RuntimeError("rapidocr backend unavailable; install the 'rapidocr' package")
+    if not args.quiet:
+        print("loading recognizer in %d workers (onnxruntime + models)..." % workers,
+              file=sys.stderr)
+
+    def tick(done, count):
+        _progress(done, count, args.quiet, label="pages recognized")
+
+    workdir = make_workdir()
+    try:
+        mark = time.monotonic()
+        tasks = iter_rendered_pages(args.input, workdir, args.dpi)
+        pages, image_paths, render_seconds = recognize_streaming(
+            tasks, total, workers, progress=tick)
+        timing["rasterize"] = render_seconds
+        timing["overlapped"] = True
+        timing["recognize"] = time.monotonic() - mark
+        return pages, workdir, tuple(image_paths)
+    except Exception:
+        shutil.rmtree(workdir, ignore_errors=True)
+        raise
+
+
+def _load_pages(args, timing):
+    if args.cached:
+        return load_cached_ocr(args.cached), None, ()
+
+    streaming = sniff(args.input) == "pdf" and available_renderer() == "pypdfium2"
+    workers = None
+    if streaming:
+        total = page_count(args.input)
+        dpi_hint = args.dpi if isinstance(args.dpi, int) else None
+        workers, reason = size_pool(total, dpi_hint, pinned=args.workers)
+        print("workers: {0} ({1})".format(workers, reason), file=sys.stderr)
+        if workers > 1:
+            return _load_pages_streaming(args, timing, total, workers)
+
+    def raster_tick(done, count):
+        _progress(done, count, args.quiet, label="rasterizing page")
+
+    mark = time.monotonic()
+    image_paths, workdir = enumerate_pages(args.input, dpi=args.dpi, progress=raster_tick)
+    timing["rasterize"] = time.monotonic() - mark
+    try:
+        if workers is None:
+            dpi_hint = args.dpi if isinstance(args.dpi, int) else None
+            workers, reason = size_pool(len(image_paths), dpi_hint, pinned=args.workers)
+            print("workers: {0} ({1})".format(workers, reason), file=sys.stderr)
+        mark = time.monotonic()
+        if workers > 1:
+            pages = _recognize_pool(image_paths, workers, quiet=args.quiet)
+        else:
+            pages = _recognize_all(image_paths, quiet=args.quiet)
+        timing["recognize"] = time.monotonic() - mark
+        return pages, workdir, tuple(image_paths)
+    except Exception:
+        if workdir:
+            shutil.rmtree(workdir, ignore_errors=True)
+        raise
+
+
 def _requested_dpi(parser, value):
     if value == "auto":
         return None
@@ -207,33 +285,6 @@ def _write_pdf(args, pages, corrected, image_paths):
     print("searchable PDF: {0} ({1} pages)".format(args.pdf_out, len(sheet)), file=sys.stderr)
 
 
-def _load_pages(args, timing):
-    if args.cached:
-        return load_cached_ocr(args.cached), None, ()
-
-    def raster_tick(done, total):
-        _progress(done, total, args.quiet, label="rasterizing page")
-
-    mark = time.monotonic()
-    image_paths, workdir = enumerate_pages(args.input, dpi=args.dpi, progress=raster_tick)
-    timing["rasterize"] = time.monotonic() - mark
-    try:
-        dpi_hint = args.dpi if isinstance(args.dpi, int) else None
-        workers, reason = size_pool(len(image_paths), dpi_hint, pinned=args.workers)
-        print("workers: {0} ({1})".format(workers, reason), file=sys.stderr)
-        mark = time.monotonic()
-        if workers > 1:
-            pages = _recognize_pool(image_paths, workers, quiet=args.quiet)
-        else:
-            pages = _recognize_all(image_paths, quiet=args.quiet)
-        timing["recognize"] = time.monotonic() - mark
-        return pages, workdir, tuple(image_paths)
-    except Exception:
-        if workdir:
-            shutil.rmtree(workdir, ignore_errors=True)
-        raise
-
-
 def _print_timing(timing, page_count, started):
     """Where the minutes went, so machines and worker counts can be compared.
 
@@ -246,6 +297,8 @@ def _print_timing(timing, page_count, started):
         if seconds is None:
             continue
         note = ""
+        if phase == "rasterize" and timing.get("overlapped"):
+            note = " overlapped"
         if phase == "recognize" and page_count:
             note = " (%.1fs/page)" % (seconds / page_count)
         parts.append("%s %.1fs%s" % (phase, seconds, note))

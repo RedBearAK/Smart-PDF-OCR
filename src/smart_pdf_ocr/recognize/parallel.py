@@ -30,7 +30,10 @@ pinned ``--workers`` value is respected, bounded only by the page count.
 """
 
 import os
+import time
+import queue
 import platform
+import threading
 import subprocess
 import multiprocessing
 
@@ -207,6 +210,22 @@ def _recognize_one(task):
         return "error", page_number, "%s: %s" % (type(exc).__name__, exc)
 
 
+def _pool_run(task_iter, total, workers, progress):
+    """Drive the spawned pool over an iterable of (page_number, image_path)."""
+    results = []
+    context = multiprocessing.get_context("spawn")
+    with context.Pool(processes=workers, initializer=_worker_setup) as pool:
+        for outcome in pool.imap_unordered(_recognize_one, task_iter):
+            if outcome[0] == "error":
+                raise RuntimeError("recognition failed on page %d: %s"
+                                   % (outcome[1], outcome[2]))
+            results.append(outcome[1])
+            if progress is not None:
+                progress(len(results), total)
+    results.sort(key=lambda page: page.page_number)
+    return results
+
+
 def recognize_parallel(image_paths, workers, progress=None):
     """Recognize all pages across a spawned pool; results in page order.
 
@@ -217,20 +236,66 @@ def recognize_parallel(image_paths, workers, progress=None):
     """
     tasks = [(index + 1, path) for index, path in enumerate(image_paths)]
     total = len(tasks)
-    results = []
-    context = multiprocessing.get_context("spawn")
-    with context.Pool(processes=workers, initializer=_worker_setup) as pool:
-        for outcome in pool.imap_unordered(_recognize_one, tasks):
-            if outcome[0] == "error":
-                raise RuntimeError("recognition failed on page %d: %s"
-                                   % (outcome[1], outcome[2]))
-            results.append(outcome[1])
-            if progress is not None:
-                progress(len(results), total)
-    results.sort(key=lambda page: page.page_number)
+    results = _pool_run(iter(tasks), total, workers, progress)
     if len(results) != total:
         raise RuntimeError("pool returned %d of %d pages" % (len(results), total))
     return results
+
+
+def _feed(tasks, channel, rendered, failure, clock):
+    """Runs in a parent-side thread: pull tasks from a producing iterator.
+
+    The iterator does real work (rendering), so exceptions are expected life,
+    not programming errors. They are recorded and the channel is closed; the
+    main thread raises them by name, deterministically, instead of trusting
+    the pool's task-handler thread to surface a mid-iteration failure.
+    """
+    started = time.monotonic()
+    try:
+        for page_number, image_path in tasks:
+            rendered.append(image_path)
+            channel.put(("task", (page_number, image_path)))
+    except Exception as exc:
+        failure.append("%s: %s" % (type(exc).__name__, exc))
+    clock.append(time.monotonic() - started)
+    channel.put(("done", None))
+
+
+def _drain(channel):
+    """The pool's side of the handoff: yield tasks until the channel closes."""
+    while True:
+        kind, payload = channel.get()
+        if kind != "task":
+            return
+        yield payload
+
+
+def recognize_streaming(tasks, total, workers, progress=None):
+    """Recognize pages while the producer is still rendering them.
+
+    ``tasks`` is a lazy iterable of (page_number, image_path) whose iteration
+    performs the rendering; it runs in a parent-side thread while the pool
+    recognizes, so rasterization hides behind recognition instead of
+    preceding it. Returns (results, rendered_paths, producer_seconds), the
+    last being the producer thread's wall time. A render failure aborts the
+    run naming how far it got; page results still reassemble in page order.
+    """
+    channel = queue.Queue()
+    rendered = []
+    failure = []
+    clock = []
+    feeder = threading.Thread(target=_feed,
+                              args=(tasks, channel, rendered, failure, clock),
+                              daemon=True)
+    feeder.start()
+    results = _pool_run(_drain(channel), total, workers, progress)
+    feeder.join()
+    if failure:
+        raise RuntimeError("rasterization failed after %d page(s): %s"
+                           % (len(rendered), failure[0]))
+    if len(results) != total:
+        raise RuntimeError("pool returned %d of %d pages" % (len(results), total))
+    return results, rendered, (clock[0] if clock else 0.0)
 
 
 # End of file #
