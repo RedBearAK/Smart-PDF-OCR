@@ -27,6 +27,7 @@ from smart_pdf_ocr.recognize.backend import PageLine, PageResult
 
 
 _ENGINE = None
+_ENGINE_PARAMS = None
 _OCR_LOGGER = "RapidOCR"
 _FILTER_INSTALLED = False
 
@@ -58,12 +59,30 @@ def _quiet_engine_logger():
     _FILTER_INSTALLED = True
 
 
+def set_engine_params(params):
+    """Set construction parameters for the engine, before its first use.
+
+    Pool workers cap their onnxruntime thread counts this way, so N workers do
+    not each spawn a machine-wide thread pool. Setting parameters after the
+    engine exists would silently do nothing, so it is refused instead.
+    """
+    global _ENGINE_PARAMS
+    if _ENGINE is not None:
+        raise RuntimeError("engine already constructed; set params before first use")
+    _ENGINE_PARAMS = dict(params)
+
+
+def warm_engine():
+    """Build the engine now, so the load cost lands at a announced moment."""
+    _engine()
+
+
 def _engine():
     global _ENGINE
     if _ENGINE is None:
         _quiet_engine_logger()
         from rapidocr import RapidOCR
-        _ENGINE = RapidOCR()
+        _ENGINE = RapidOCR(params=_ENGINE_PARAMS) if _ENGINE_PARAMS else RapidOCR()
         _quiet_engine_logger()
     return _ENGINE
 

@@ -30,6 +30,7 @@ from smart_pdf_ocr.correct.disagree import DISAGREE_RATIO
 from smart_pdf_ocr.correct.pipeline import correct_document, assemble_text
 from smart_pdf_ocr.correct.normalize import MODE_EVIDENCE, MODE_FORCE, MODE_OFF
 from smart_pdf_ocr.recognize.backend import load_cached_ocr
+from smart_pdf_ocr.recognize.parallel import size_pool, recognize_parallel
 from smart_pdf_ocr.ingest.container import sniff, resolve_dpi, enumerate_pages, available_renderer
 from smart_pdf_ocr.review.profile import counts_of, load_profile, save_profile, learn_profile
 from smart_pdf_ocr.correct.errors import contradictions, malformed, load_error_patterns
@@ -135,6 +136,8 @@ def _progress(done, total, quiet):
 def _recognize_all(image_paths, quiet=False):
     if not rapidocr_backend.is_available():
         raise RuntimeError("rapidocr backend unavailable; install the 'rapidocr' package")
+    if not quiet:
+        print("loading recognizer (onnxruntime + models)...", file=sys.stderr)
     total = len(image_paths)
     results = []
     for index, image_path in enumerate(image_paths):
@@ -143,11 +146,32 @@ def _recognize_all(image_paths, quiet=False):
     return results
 
 
+def _recognize_pool(image_paths, workers, quiet=False):
+    if not rapidocr_backend.is_available():
+        raise RuntimeError("rapidocr backend unavailable; install the 'rapidocr' package")
+    if not quiet:
+        print("loading recognizer in %d workers (onnxruntime + models)..." % workers,
+              file=sys.stderr)
+
+    def tick(done, total):
+        _progress(done, total, quiet)
+
+    return recognize_parallel(image_paths, workers, progress=tick)
+
+
 def _requested_dpi(parser, value):
     if value == "auto":
         return None
     if not value.isdigit() or int(value) <= 0:
         parser.error("--dpi must be a positive integer or 'auto'")
+    return int(value)
+
+
+def _requested_workers(parser, value):
+    if value == "auto":
+        return None
+    if not value.isdigit() or int(value) <= 0:
+        parser.error("--workers must be a positive integer or 'auto'")
     return int(value)
 
 
@@ -181,7 +205,14 @@ def _load_pages(args):
         return load_cached_ocr(args.cached), None, ()
     image_paths, workdir = enumerate_pages(args.input, dpi=args.dpi)
     try:
-        return _recognize_all(image_paths, quiet=args.quiet), workdir, tuple(image_paths)
+        dpi_hint = args.dpi if isinstance(args.dpi, int) else None
+        workers, reason = size_pool(len(image_paths), dpi_hint, pinned=args.workers)
+        print("workers: {0} ({1})".format(workers, reason), file=sys.stderr)
+        if workers > 1:
+            pages = _recognize_pool(image_paths, workers, quiet=args.quiet)
+        else:
+            pages = _recognize_all(image_paths, quiet=args.quiet)
+        return pages, workdir, tuple(image_paths)
     except Exception:
         if workdir:
             shutil.rmtree(workdir, ignore_errors=True)
@@ -223,6 +254,10 @@ def build_parser():
     parser.add_argument("--review-in", help="apply human corrections from a completed review file")
     parser.add_argument("--profile", help="load a vendor profile of canonicals (JSON)")
     parser.add_argument("--learn-profile", help="write a vendor profile learned from this run")
+    parser.add_argument("--workers", default="auto",
+                        help="parallel recognition workers: a count, 'auto' to size "
+                             "from cores and free memory (the default), or 1 for the "
+                             "sequential path")
     parser.add_argument("--quiet", action="store_true", help="suppress the per-page progress line")
     parser.add_argument("--keep-diacritics", action="store_true",
                         help="never fold non-ASCII characters to ASCII")
@@ -271,6 +306,7 @@ def _run(argv=None):
         return 2
 
     requested = _requested_dpi(parser, str(args.dpi))
+    args.workers = _requested_workers(parser, str(args.workers))
     if args.input and not args.cached:
         kind = sniff(args.input)
         print("container: " + kind, file=sys.stderr)

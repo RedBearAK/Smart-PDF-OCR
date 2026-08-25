@@ -1,77 +1,76 @@
-MANIFEST.txt -- widthfit tarball
-Apply into: ~/DropBox/Tech_scripts/Smart-PDF-OCR/  (repo root)
-Apply after: overwrite_guard (this is the next tarball in the sequence)
+MANIFEST.txt -- workers tarball
+Apply into: repo root (dev_beta, on or after commit 56a020e "Handle text box
+widths better")
+Apply after: widthfit
 
-FILES (full drop-in replacements)
+FILES (full drop-in replacements, except the two new ones)
 
-  src/smart_pdf_ocr/review/pdf_out.py
-  tests/test_pdf_out.py
+  README.md                                        (modified)
+  src/smart_pdf_ocr/cli.py                         (modified)
+  src/smart_pdf_ocr/patterns/field_rgx.py          (modified)
+  src/smart_pdf_ocr/recognize/rapidocr_backend.py  (modified)
+  src/smart_pdf_ocr/recognize/parallel.py          (NEW)
+  tests/test_parallel.py                           (NEW)
 
 WHAT CHANGES
 
-  Two placement defects in the invisible text layer, found when a
-  pdf-manipulator dump of the Aug 23 batch came back reading
-  `ForwardTinOgTAL` and `PØase pay this am$2o5u6.n0t0:`.
+  1. Parallel recognition, sized to the machine. A new --workers flag:
+     'auto' (the default) sizes a spawned process pool from three bounds and
+     announces the arithmetic on stderr --
 
-  1. Runs are now WIDTH-FITTED to their recognizer boxes. Base font
-     Helvetica -> Courier (fixed 600/1000 em advance makes natural width
-     exact arithmetic), plus a per-line Tz horizontal scale so each run
-     spans exactly its box. Previously a run's natural width routinely
-     overran the box and spilled into the neighboring column; extractors
-     that sort characters by x-position then interleaved the two columns
-     character by character. Verified clean against pdfplumber (default
-     char-sorting mode), pypdf, and pypdfium2. Bonus: selection now covers
-     exactly the pixels a line annotates.
+         workers: 4 (8 cores -> 4, 9.6GB free -> 10 @ 700MB/worker, 82 pages)
 
-  2. The font dictionary now declares /Encoding /WinAnsiEncoding, and the
-     stream is encoded cp1252 to match. Without it, extractors fell back to
-     Adobe StandardEncoding, remapping bytes: e-acute (0xE9) read back as a
-     slashed O (`Péase` -> `PØase`) and even the ASCII apostrophe (0x27) as
-     a curly quote (`Addt'l` -> `Addt’l`). Side benefit of cp1252 over the
-     old latin-1: typographic quotes/dashes/bullets in corrected text now
-     encode instead of becoming `?`.
+     Core bound: cores // 2, each worker's engine capped at 2 intra-op
+     onnxruntime threads (the engine's own threading already spreads one page
+     across cores; workers multiply that). Memory bound: reclaimable RAM
+     (Linux /proc/meminfo MemAvailable; macOS vm_stat free + inactive +
+     speculative pages -- the pool unified memory reclaims gracefully) minus a
+     headroom floor of max(2GB, 25%), divided by the measured worker cost
+     (700MB at <=300 dpi, 900MB above). Page bound: never more workers than
+     pages. Hard cap 8, floor 1. A failed memory probe retreats to 2 workers
+     and says so. --workers N pins the count (bounded by pages);
+     --workers 1 takes the original sequential path untouched.
 
-  Also: the layer's stream is wrapped in q/Q, so render mode 3 and the Tz
-  scale cannot leak into content appended after it (the old stream left
-  invisible-mode set page-wide for any later writer).
+  2. Fail-loud pool semantics. Workers are spawn-context processes (fork is
+     unsafe under onnxruntime), each with its own engine, warmed in the pool
+     initializer. A page that fails aborts the whole run naming that page.
+     Results reassemble in page order before correction runs, so nothing
+     downstream of recognition changes at all. Ctrl-C terminates the pool via
+     the context manager and exits 130 as before.
 
-  No interface changes. pages_from(), write_searchable_pdf() signatures,
-  file-size behavior (+~400 bytes/page of text), and the pikepdf-only
-  optional dependency are all unchanged.
+  3. Startup announcement. Both paths now print a line before the multi-second
+     import + model load ("loading recognizer (onnxruntime + models)...";
+     the pool flavor names the worker count), so the warm-up gap no longer
+     looks like a hang. Suppressed by --quiet, like the progress line.
+
+  4. rapidocr_backend gains set_engine_params() (construction params, refused
+     after the engine exists) and warm_engine(). field_rgx gains the five
+     memory-probe regexes (MEMINFO_AVAILABLE_rgx, VM_STAT_*_rgx).
+
+  No changes to: container.py (the parent still rasterizes; workers receive
+  image paths and return PageResults), the correction layer, outputs, or any
+  interface other than the new flag. --cached runs never size a pool.
 
 TESTS
 
-  tests/test_pdf_out.py: the five existing tests unchanged, plus three new:
-    test_every_glyph_stays_inside_its_box
-    test_position_sorted_extraction_does_not_interleave   (simulates the
-        pdfminer-family char-sort that shredded the Aug 23 dump)
-    test_declared_encoding_round_trips_non_ascii
-  All three verified to FAIL against the old module behavior and PASS
-  against the new. Standalone run: 8/8.
+  tests/test_parallel.py: 12 tests -- canned meminfo/vm_stat parsing, every
+  sizing bound (core, memory, dpi cost, page count, cap, floor, failed probe,
+  pinned), a live memory probe, and two real spawned-pool tests: 2-worker
+  output must exactly match the sequential path in text and page order with
+  monotonic progress ticks, and a missing page image must abort naming the
+  page. The pool tests skip when rapidocr or Pillow is absent.
 
-MANUAL STEP -- pattern files (do not ship in a tarball; they are yours)
+  Full suite after application: 119 passed, pyflakes clean. End-to-end
+  verified on a 4-page PDF: pooled and sequential corrected output identical,
+  --pdf-out unaffected.
 
-  error_patterns.txt   add line:  Addt'I
-  known_patterns.txt   add line:  Addt'l Handling
+EXPECTED RESULT ON THE 16GB MACHINES
 
-  Rationale: `Addt'I` (capital I) appeared 5x in run 404's corrected output
-  vs the correct `Addt'l` once -- clears the recurrence bar. It is
-  never-correct, and `Addt'l` sits 1 edit away on a 6-char term, so it
-  resolves unambiguously under existing rules. Apostrophes are ASCII 0x27
-  in the corrected output (verified by od); enter them as plain '.
-  Caveat: if the corrector's tokenizer splits on apostrophes these entries
-  will not fire -- confirm on the next run and revisit if so.
-
-  Watch-list only (once or twice each, per the lean-file principle):
-  `Péase`, `paymént` (e-acute intrusions), stray CJK marks. If they recur,
-  a structure guard for non-ASCII letters embedded in otherwise-ASCII words
-  fits better than per-word entries.
-
-NOTE ON EXISTING OUTPUT
-
-  Already-generated searchable PDFs keep the old layer; re-run the tool to
-  regenerate. The complementary pdf-manipulator fix (stream-order
-  extraction; see pdf-manipulator-extraction-handoff.md) covers old PDFs
-  without regeneration.
+  Auto-sizing resolves to 4 workers (core-bound) on both. The 82-page batch
+  should land around 2 to 2.5 minutes against the 5-minute sequential run --
+  measure once to confirm; if the gain disappoints, the engine's pre-existing
+  intra-op parallelism is the suspect, and pinning --workers against a
+  stopwatch will show the true curve. Rasterization stays serial in the
+  parent (measured at 0.1-0.5 s/page, not worth worker-side rendering yet).
 
 # End of file #

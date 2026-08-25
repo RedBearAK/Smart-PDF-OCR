@@ -52,5 +52,15 @@ IDENTIFIER_rgx = re.compile(r"\d{5,}")
 # Dates legitimately differ between pages, so they are never flagged as errors.
 DATE_rgx = re.compile(r"\b\d{1,2}/\d{1,2}/\d{2,4}\b")
 
+# Memory probes for worker-pool sizing. Linux /proc/meminfo reports available
+# memory directly; macOS vm_stat reports page counts, where the reclaimable pool
+# (free + inactive + speculative) is what unified memory hands back gracefully
+# under pressure.
+MEMINFO_AVAILABLE_rgx = re.compile(r"^MemAvailable:\s+(\d+)\s+kB", re.M)
+VM_STAT_PAGE_SIZE_rgx = re.compile(r"page size of (\d+) bytes")
+VM_STAT_FREE_rgx = re.compile(r"^Pages free:\s+(\d+)", re.M)
+VM_STAT_INACTIVE_rgx = re.compile(r"^Pages inactive:\s+(\d+)", re.M)
+VM_STAT_SPECULATIVE_rgx = re.compile(r"^Pages speculative:\s+(\d+)", re.M)
+
 
 # End of file #

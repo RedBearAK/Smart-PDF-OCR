@@ -105,6 +105,38 @@ recognition time is nearly flat in page pixels, because detection downsizes
 internally and recognition scales with the number of text lines, not megapixels --
 9.6 s at 3.7 Mpx against 9.8 s at 14.9 Mpx.
 
+## Parallel recognition: sized to the machine, and it says so
+
+Pages are independent, and the correction layer needs the whole document at once
+either way, so recognition parallelizes cleanly. By default the tool sizes a
+worker pool from the machine it is on and announces the arithmetic:
+
+```
+workers: 4 (8 cores -> 4, 9.6GB free -> 10 @ 700MB/worker, 82 pages)
+loading recognizer in 4 workers (onnxruntime + models)...
+```
+
+Three bounds, smallest wins, and the line says which one did. The core bound
+pairs each worker with two engine threads -- the engine's own threading already
+spreads one page across cores, and workers multiply that. The memory bound
+divides reclaimable RAM (on macOS: free + inactive + speculative pages, the pool
+unified memory hands back under pressure) by the measured cost of a worker,
+about 0.7 GB at ordinary resolutions, 0.9 GB above 300 dpi, after a headroom
+floor is set aside. The page count caps the rest. When the memory probe fails,
+the pool retreats to two workers and says so rather than guessing.
+
+```
+smart-pdf-ocr doc.pdf                # auto-sized pool (the default)
+smart-pdf-ocr doc.pdf --workers 6    # pinned; bounded only by the page count
+smart-pdf-ocr doc.pdf --workers 1    # the sequential path, exactly as before
+```
+
+Workers are spawned processes, each with its own engine: a crash is isolated and
+aborts the run naming its page, and results always reassemble in page order
+before correction sees them, so nothing downstream changes at all. `--workers 1`
+takes the original sequential code path untouched. Either way the multi-second
+model load now announces itself instead of looking like a hang.
+
 ## Page markers in the text output
 
 Each page in the corrected text dump is headed by a marker line:
