@@ -150,10 +150,11 @@ def _unpack_bundle(path, workdir):
     return [image_path for _number, image_path in order]
 
 
-def _rasterize_with_pdfium(path, workdir, dpi):
+def _rasterize_with_pdfium(path, workdir, dpi, progress=None):
     import pypdfium2 as pdfium
 
     document = pdfium.PdfDocument(path)
+    total = len(document)
     scale = dpi / 72.0
     paths = []
     for index, page in enumerate(document):
@@ -161,6 +162,8 @@ def _rasterize_with_pdfium(path, workdir, dpi):
         target = os.path.join(workdir, "page-%04d.jpg" % (index + 1))
         image.save(target, quality=95)
         paths.append(target)
+        if progress is not None:
+            progress(index + 1, total)
     return paths
 
 
@@ -176,17 +179,23 @@ def _rasterize_with_poppler(path, workdir, dpi):
     return [os.path.join(workdir, name) for name in names]
 
 
-def _rasterize_pdf(path, workdir, dpi=FALLBACK_DPI):
+def _rasterize_pdf(path, workdir, dpi=FALLBACK_DPI, progress=None):
     renderer = available_renderer()
     if renderer == "pypdfium2":
-        return _rasterize_with_pdfium(path, workdir, dpi)
+        return _rasterize_with_pdfium(path, workdir, dpi, progress)
     if renderer == "pdftoppm":
         return _rasterize_with_poppler(path, workdir, dpi)
     raise RuntimeError(MISSING_RENDERER_MESSAGE)
 
 
-def enumerate_pages(path, dpi=None):
-    """Return (ordered_image_paths, workdir). The caller removes workdir."""
+def enumerate_pages(path, dpi=None, progress=None):
+    """Return (ordered_image_paths, workdir). The caller removes workdir.
+
+    ``progress`` is called with (done, total) per page while a real PDF is
+    rasterized -- an 80-page document renders for many silent seconds
+    otherwise. Bundles and bare images finish too quickly to narrate, and the
+    poppler path is one opaque subprocess, so neither reports.
+    """
     kind = sniff(path)
     if kind == "pdf" and dpi is None:
         dpi = resolve_dpi(path)[0]
@@ -195,7 +204,7 @@ def enumerate_pages(path, dpi=None):
         return _unpack_bundle(path, workdir), workdir
     if kind == "pdf":
         try:
-            return _rasterize_pdf(path, workdir, dpi), workdir
+            return _rasterize_pdf(path, workdir, dpi, progress), workdir
         except Exception:
             shutil.rmtree(workdir, ignore_errors=True)
             raise

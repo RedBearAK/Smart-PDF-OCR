@@ -119,8 +119,9 @@ loading recognizer in 4 workers (onnxruntime + models)...
 Three bounds, smallest wins, and the line says which one did. The core bound
 pairs each worker with two engine threads -- the engine's own threading already
 spreads one page across cores, and workers multiply that. The memory bound
-divides reclaimable RAM (on macOS: free + inactive + speculative pages, the pool
-unified memory hands back under pressure) by the measured cost of a worker,
+divides reclaimable RAM (on macOS: memory_pressure's own free percentage, with
+the vm_stat free + purgeable + file-backed pool as fallback -- unified-memory
+machines keep their real headroom in caches) by the measured cost of a worker,
 about 0.7 GB at ordinary resolutions, 0.9 GB above 300 dpi, after a headroom
 floor is set aside. The page count caps the rest. When the memory probe fails,
 the pool retreats to two workers and says so rather than guessing.

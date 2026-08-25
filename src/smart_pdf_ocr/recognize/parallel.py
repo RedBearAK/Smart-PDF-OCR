@@ -18,10 +18,11 @@ own intra-op threading already spreads a single page across cores; workers
 multiply that, and unconstrained workers times unconstrained threads is how a
 machine thrashes. The memory bound divides what the OS reports as reclaimable by
 the measured cost of one worker -- model weights are cheap, inference scratch is
-not -- after setting a headroom floor aside. On macOS the reclaimable pool counts
-free + inactive + speculative pages, which is exactly the memory a unified-memory
-machine hands back gracefully under pressure. The page bound stops the pool
-outgrowing the work.
+not -- after setting a headroom floor aside. On macOS the reading is
+memory_pressure's own free percentage, with the vm_stat reclaimable pool
+(free + purgeable + file-backed) as the fallback: unified-memory machines keep
+most of their real headroom in caches, and naive free-page counts starve the
+pool. The page bound stops the pool outgrowing the work.
 
 When the memory probe fails, the answer is a stated retreat, not a guess: the
 pool is capped at two workers and the announcement says the probe failed. A
@@ -36,10 +37,11 @@ import multiprocessing
 from smart_pdf_ocr.recognize import rapidocr_backend
 from smart_pdf_ocr.patterns.field_rgx import (
     VM_STAT_FREE_rgx,
-    VM_STAT_INACTIVE_rgx,
     VM_STAT_PAGE_SIZE_rgx,
-    VM_STAT_SPECULATIVE_rgx,
+    VM_STAT_PURGEABLE_rgx,
+    VM_STAT_FILE_BACKED_rgx,
     MEMINFO_AVAILABLE_rgx,
+    MEMORY_PRESSURE_PCT_rgx,
 )
 
 
@@ -76,21 +78,56 @@ def _linux_available_mb(meminfo_text):
     return int(found.group(1)) // 1024
 
 
-def _darwin_available_mb(vm_stat_text):
-    """Reclaimable memory from vm_stat output, in MB.
+def _darwin_pressure_mb(pressure_text, total_mb):
+    """Available memory from memory_pressure's free percentage, in MB.
 
-    Free pages alone undercount badly on macOS, where healthy machines keep
-    most memory in caches. Inactive and speculative pages are reclaimed on
-    demand, so they belong to the pool a new worker can actually use.
+    This is Apple's own pressure-based view of availability, and the number
+    unified memory actually honors. Field-tested: on a 16 GB machine with
+    ~10 GB genuinely reclaimable, the old free+inactive formula read 3.7 GB
+    and starved the pool down to one worker.
+    """
+    found = MEMORY_PRESSURE_PCT_rgx.search(pressure_text)
+    if not found or total_mb <= 0:
+        return 0
+    return (total_mb * int(found.group(1))) // 100
+
+
+def _darwin_vm_stat_mb(vm_stat_text):
+    """Fallback reclaimable memory from vm_stat, in MB.
+
+    free + purgeable + file-backed: the pool behind Activity Monitor's
+    "available" (free plus cached files). Inactive anonymous pages are NOT
+    counted -- they may be dirty and swap-bound, and counting them is how the
+    pool over-commits.
     """
     size = VM_STAT_PAGE_SIZE_rgx.search(vm_stat_text)
     page_size = int(size.group(1)) if size else DARWIN_PAGE_SIZE
     pages = 0
-    for regex in (VM_STAT_FREE_rgx, VM_STAT_INACTIVE_rgx, VM_STAT_SPECULATIVE_rgx):
+    for regex in (VM_STAT_FREE_rgx, VM_STAT_PURGEABLE_rgx, VM_STAT_FILE_BACKED_rgx):
         found = regex.search(vm_stat_text)
         if found:
             pages += int(found.group(1))
     return (pages * page_size) // (1024 * 1024)
+
+
+def _run_probe(command):
+    probe = subprocess.run(command, capture_output=True, text=True, check=True)
+    return probe.stdout
+
+
+def _darwin_available_mb():
+    """memory_pressure first; the vm_stat pool as the fallback."""
+    try:
+        total_mb = int(_run_probe(["sysctl", "-n", "hw.memsize"]).strip()) // (1024 * 1024)
+        from_pressure = _darwin_pressure_mb(_run_probe(["memory_pressure"]), total_mb)
+        if from_pressure > 0:
+            return from_pressure
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
+    try:
+        return _darwin_vm_stat_mb(_run_probe(["vm_stat"]))
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return 0
 
 
 def available_memory_mb():
@@ -101,10 +138,8 @@ def available_memory_mb():
             with open("/proc/meminfo", encoding="ascii") as handle:
                 return _linux_available_mb(handle.read())
         if system == "Darwin":
-            probe = subprocess.run(["vm_stat"], capture_output=True, text=True,
-                                   check=True)
-            return _darwin_available_mb(probe.stdout)
-    except (OSError, ValueError, subprocess.SubprocessError):
+            return _darwin_available_mb()
+    except (OSError, ValueError):
         return 0
     return 0
 

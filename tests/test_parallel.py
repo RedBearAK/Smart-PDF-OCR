@@ -6,7 +6,7 @@ The sizing policy takes the smallest of three bounds -- cores paired with capped
 engine threads, reclaimable memory over measured per-worker cost, and the page
 count -- and states which bound won. These tests drive it with injected readings,
 so the policy is pinned without depending on the machine running the suite. The
-memory parsers get canned /proc/meminfo and vm_stat text for the same reason.
+memory parsers get canned /proc/meminfo, memory_pressure, and vm_stat text for the same reason.
 
 The last two tests spawn a real pool: two workers over three tiny images must
 produce exactly what the sequential path produces, in page order, and a page
@@ -23,7 +23,8 @@ from smart_pdf_ocr.recognize.parallel import (
     available_memory_mb,
     recognize_parallel,
     _linux_available_mb,
-    _darwin_available_mb,
+    _darwin_pressure_mb,
+    _darwin_vm_stat_mb,
     MAX_WORKERS,
     UNKNOWN_MEMORY_CAP,
 )
@@ -35,12 +36,29 @@ MemAvailable:   10240000 kB
 Buffers:          123456 kB
 """
 
+MEMORY_PRESSURE_SAMPLE = """The system has 17179869184 (1048576 pages with a page size of 16384).
+
+Stats:
+Pages free: 226092
+Pages purgeable: 12288
+Pages purged: 10608
+
+Swap I/O:
+Swapins: 0
+Swapouts: 0
+
+System-wide memory free percentage: 63%
+"""
+
 VM_STAT_SAMPLE = """Mach Virtual Memory Statistics: (page size of 16384 bytes)
 Pages free:                              100000.
 Pages active:                            300000.
 Pages inactive:                          200000.
 Pages speculative:                        50000.
+Pages purgeable:                          30000.
 Pages wired down:                        150000.
+File-backed pages:                       220000.
+Anonymous pages:                         330000.
 """
 
 
@@ -57,10 +75,29 @@ def test_meminfo_parse_reads_available():
     return mb == 10000
 
 
-def test_vm_stat_parse_counts_reclaimable_pages():
-    """free + inactive + speculative pages, times the stated page size."""
-    mb = _darwin_available_mb(VM_STAT_SAMPLE)
-    expected = (350000 * 16384) // (1024 * 1024)
+def test_memory_pressure_percentage_is_primary():
+    """Apple's own free percentage of total memory: 63% of 16 GB."""
+    mb = _darwin_pressure_mb(MEMORY_PRESSURE_SAMPLE, 16384)
+    print(f"  parsed {mb} MB")
+    return mb == 16384 * 63 // 100
+
+
+def test_memory_pressure_without_the_line_yields_zero():
+    """No percentage line means no answer, so the fallback gets its turn."""
+    mb = _darwin_pressure_mb("Stats:\nPages free: 5\n", 16384)
+    print(f"  parsed {mb} MB")
+    return mb == 0
+
+
+def test_vm_stat_fallback_counts_the_reclaimable_pool():
+    """free + purgeable + file-backed, times the stated page size.
+
+    Inactive anonymous pages are deliberately NOT counted: they may be dirty
+    and swap-bound. Field report: counting inactive+speculative read 3.7 GB
+    on a machine with ~10 GB genuinely available and starved the pool.
+    """
+    mb = _darwin_vm_stat_mb(VM_STAT_SAMPLE)
+    expected = ((100000 + 30000 + 220000) * 16384) // (1024 * 1024)
     print(f"  parsed {mb} MB (expected {expected})")
     return mb == expected
 
@@ -181,7 +218,9 @@ def test_failed_page_aborts_naming_the_page():
 def main():
     tests = [
         test_meminfo_parse_reads_available,
-        test_vm_stat_parse_counts_reclaimable_pages,
+        test_memory_pressure_percentage_is_primary,
+        test_memory_pressure_without_the_line_yields_zero,
+        test_vm_stat_fallback_counts_the_reclaimable_pool,
         test_core_bound_pairs_workers_with_capped_threads,
         test_memory_bound_wins_on_a_small_machine,
         test_high_dpi_raises_the_per_worker_cost,

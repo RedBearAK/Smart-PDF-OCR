@@ -119,18 +119,18 @@ def _path_problems(args):
     return problems
 
 
-def _progress(done, total, quiet):
+def _progress(done, total, quiet, verb="recognizing"):
     """A multi-minute run should not look like a hang."""
     if quiet:
         return
     if sys.stderr.isatty():
-        sys.stderr.write("\r  recognizing page %d/%d" % (done, total))
+        sys.stderr.write("\r  %s page %d/%d" % (verb, done, total))
         if done == total:
             sys.stderr.write("\n")
         sys.stderr.flush()
         return
     if done == total or done % 10 == 0:
-        print("  recognizing page %d/%d" % (done, total), file=sys.stderr)
+        print("  %s page %d/%d" % (verb, done, total), file=sys.stderr)
 
 
 def _recognize_all(image_paths, quiet=False):
@@ -203,7 +203,11 @@ def _write_pdf(args, pages, corrected, image_paths):
 def _load_pages(args):
     if args.cached:
         return load_cached_ocr(args.cached), None, ()
-    image_paths, workdir = enumerate_pages(args.input, dpi=args.dpi)
+
+    def raster_tick(done, total):
+        _progress(done, total, args.quiet, verb="rasterizing")
+
+    image_paths, workdir = enumerate_pages(args.input, dpi=args.dpi, progress=raster_tick)
     try:
         dpi_hint = args.dpi if isinstance(args.dpi, int) else None
         workers, reason = size_pool(len(image_paths), dpi_hint, pinned=args.workers)

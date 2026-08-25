@@ -1,76 +1,69 @@
-MANIFEST.txt -- workers tarball
-Apply into: repo root (dev_beta, on or after commit 56a020e "Handle text box
-widths better")
-Apply after: widthfit
+MANIFEST.txt -- memprobe tarball
+Apply into: repo root (dev_beta)
+Apply after: workers (this revises it from the first field test)
 
-FILES (full drop-in replacements, except the two new ones)
+FILES (full drop-in replacements, except the container which gains a parameter)
 
-  README.md                                        (modified)
-  src/smart_pdf_ocr/cli.py                         (modified)
-  src/smart_pdf_ocr/patterns/field_rgx.py          (modified)
-  src/smart_pdf_ocr/recognize/rapidocr_backend.py  (modified)
-  src/smart_pdf_ocr/recognize/parallel.py          (NEW)
-  tests/test_parallel.py                           (NEW)
+  README.md                                    (modified)
+  src/smart_pdf_ocr/cli.py                     (modified)
+  src/smart_pdf_ocr/ingest/container.py        (modified)
+  src/smart_pdf_ocr/patterns/field_rgx.py      (modified)
+  src/smart_pdf_ocr/recognize/parallel.py      (modified)
+  tests/test_parallel.py                       (modified)
+
+FIELD REPORT THIS ANSWERS (M1 mini, 16GB, 82-page 400dpi batch)
+
+  workers: 1 (8 cores -> 4, 3.7GB free -> 1 @ 900MB/worker, 82 pages)
+
+  ...on a machine with ~10GB genuinely available, plus a silent multi-second
+  gap between "error patterns: N loaded" and the workers line.
 
 WHAT CHANGES
 
-  1. Parallel recognition, sized to the machine. A new --workers flag:
-     'auto' (the default) sizes a spawned process pool from three bounds and
-     announces the arithmetic on stderr --
+  1. macOS memory probe rebuilt. The old vm_stat formula (free + inactive +
+     speculative) undercounts badly: unified-memory machines keep their real
+     headroom in caches, and inactive anonymous pages may be dirty and
+     swap-bound anyway. New order:
+       primary   memory_pressure's "System-wide memory free percentage"
+                 x hw.memsize -- Apple's own pressure-based availability
+       fallback  vm_stat free + purgeable + file-backed (the pool behind
+                 Activity Monitor's "available": free + cached files)
+     Linux /proc/meminfo path unchanged. On the reported machine this should
+     read ~10GB -> memory allows 8 -> core bound wins -> 4 workers.
+     field_rgx: MEMORY_PRESSURE_PCT_rgx, VM_STAT_PURGEABLE_rgx,
+     VM_STAT_FILE_BACKED_rgx added; the inactive/speculative regexes removed.
 
-         workers: 4 (8 cores -> 4, 9.6GB free -> 10 @ 700MB/worker, 82 pages)
+  2. The silent gap was rasterization: the parent renders all pages before
+     sizing runs, and at 400dpi x 82 pages that is many mute seconds.
+     enumerate_pages/_rasterize_pdf/_rasterize_with_pdfium now thread an
+     optional (done, total) progress callback, and the CLI shows
+     "  rasterizing page X/Y" in the same style as recognition (the
+     _progress helper gained a verb parameter). Bundles, bare images, and
+     the poppler subprocess path do not narrate; only the pdfium loop does.
+     No behavioral change for callers that pass nothing.
 
-     Core bound: cores // 2, each worker's engine capped at 2 intra-op
-     onnxruntime threads (the engine's own threading already spreads one page
-     across cores; workers multiply that). Memory bound: reclaimable RAM
-     (Linux /proc/meminfo MemAvailable; macOS vm_stat free + inactive +
-     speculative pages -- the pool unified memory reclaims gracefully) minus a
-     headroom floor of max(2GB, 25%), divided by the measured worker cost
-     (700MB at <=300 dpi, 900MB above). Page bound: never more workers than
-     pages. Hard cap 8, floor 1. A failed memory probe retreats to 2 workers
-     and says so. --workers N pins the count (bounded by pages);
-     --workers 1 takes the original sequential path untouched.
+  Expected stderr sequence after this:
+      error patterns: 21 loaded
+        rasterizing page 82/82
+      workers: 4 (8 cores -> 4, 10.2GB free -> 8 @ 900MB/worker, 82 pages)
+      loading recognizer in 4 workers (onnxruntime + models)...
+        recognizing page 82/82
 
-  2. Fail-loud pool semantics. Workers are spawn-context processes (fork is
-     unsafe under onnxruntime), each with its own engine, warmed in the pool
-     initializer. A page that fails aborts the whole run naming that page.
-     Results reassemble in page order before correction runs, so nothing
-     downstream of recognition changes at all. Ctrl-C terminates the pool via
-     the context manager and exits 130 as before.
-
-  3. Startup announcement. Both paths now print a line before the multi-second
-     import + model load ("loading recognizer (onnxruntime + models)...";
-     the pool flavor names the worker count), so the warm-up gap no longer
-     looks like a hang. Suppressed by --quiet, like the progress line.
-
-  4. rapidocr_backend gains set_engine_params() (construction params, refused
-     after the engine exists) and warm_engine(). field_rgx gains the five
-     memory-probe regexes (MEMINFO_AVAILABLE_rgx, VM_STAT_*_rgx).
-
-  No changes to: container.py (the parent still rasterizes; workers receive
-  image paths and return PageResults), the correction layer, outputs, or any
-  interface other than the new flag. --cached runs never size a pool.
+  On the 50% btop saturation: that is the sequential engine's own intra-op
+  threading, and it is the expected ceiling at 1 worker. It should climb
+  substantially at 4 workers x 2 capped threads.
 
 TESTS
 
-  tests/test_parallel.py: 12 tests -- canned meminfo/vm_stat parsing, every
-  sizing bound (core, memory, dpi cost, page count, cap, floor, failed probe,
-  pinned), a live memory probe, and two real spawned-pool tests: 2-worker
-  output must exactly match the sequential path in text and page order with
-  monotonic progress ticks, and a missing page image must abort naming the
-  page. The pool tests skip when rapidocr or Pillow is absent.
+  test_parallel.py grows to 14: memory_pressure percentage parse, the
+  missing-percentage-line fallback trigger, and the corrected vm_stat pool
+  (with the field numbers cited in the docstring). Full suite: 121 passed,
+  pyflakes clean. End-to-end re-verified: rasterizing counter appears in the
+  gap, pooled output byte-identical to the previous build.
 
-  Full suite after application: 119 passed, pyflakes clean. End-to-end
-  verified on a 4-page PDF: pooled and sequential corrected output identical,
-  --pdf-out unaffected.
-
-EXPECTED RESULT ON THE 16GB MACHINES
-
-  Auto-sizing resolves to 4 workers (core-bound) on both. The 82-page batch
-  should land around 2 to 2.5 minutes against the 5-minute sequential run --
-  measure once to confirm; if the gain disappoints, the engine's pre-existing
-  intra-op parallelism is the suspect, and pinning --workers against a
-  stopwatch will show the true curve. Rasterization stays serial in the
-  parent (measured at 0.1-0.5 s/page, not worth worker-side rendering yet).
+  NOTE: memory_pressure and hw.memsize cannot run in the build sandbox
+  (Linux); the parse layer is pinned by canned text, but the live macOS
+  probe path gets its first real execution on your machine. If the workers
+  line still reads low, run `memory_pressure | tail -1` and send the output.
 
 # End of file #
