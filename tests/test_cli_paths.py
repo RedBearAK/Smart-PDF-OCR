@@ -159,6 +159,19 @@ def test_two_outputs_to_one_path_refused():
     return code == 2 and "both write" in err
 
 
+def test_timing_line_reports_the_run():
+    """Every successful run ends by saying where its time went."""
+    dump = _cached_dump()
+    out = _fresh(".txt")
+    code, err = _run(["--cached", dump, "-o", out])
+    os.unlink(dump)
+    if os.path.exists(out):
+        os.unlink(out)
+    line = [entry for entry in err.splitlines() if entry.startswith("timing:")]
+    print(f"  exit={code}  {line}")
+    return code == 0 and len(line) == 1 and "total" in line[0] and "correct" in line[0]
+
+
 def main():
     tests = [
         test_missing_input_file_is_a_usage_error,
@@ -172,6 +185,7 @@ def main():
         test_existing_output_needs_force,
         test_pdf_out_will_not_overwrite_the_input,
         test_two_outputs_to_one_path_refused,
+        test_timing_line_reports_the_run,
     ]
     score = 0
     for test in tests:

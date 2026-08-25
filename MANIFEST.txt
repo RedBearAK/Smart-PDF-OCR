@@ -1,69 +1,45 @@
-MANIFEST.txt -- memprobe tarball
+MANIFEST.txt -- timing tarball
 Apply into: repo root (dev_beta)
-Apply after: workers (this revises it from the first field test)
+Apply after: memprobe
 
-FILES (full drop-in replacements, except the container which gains a parameter)
+FILES (full drop-in replacements)
 
-  README.md                                    (modified)
-  src/smart_pdf_ocr/cli.py                     (modified)
-  src/smart_pdf_ocr/ingest/container.py        (modified)
-  src/smart_pdf_ocr/patterns/field_rgx.py      (modified)
-  src/smart_pdf_ocr/recognize/parallel.py      (modified)
-  tests/test_parallel.py                       (modified)
-
-FIELD REPORT THIS ANSWERS (M1 mini, 16GB, 82-page 400dpi batch)
-
-  workers: 1 (8 cores -> 4, 3.7GB free -> 1 @ 900MB/worker, 82 pages)
-
-  ...on a machine with ~10GB genuinely available, plus a silent multi-second
-  gap between "error patterns: N loaded" and the workers line.
+  README.md                   (modified: one sentence in the parallel section)
+  src/smart_pdf_ocr/cli.py    (modified)
+  tests/test_cli_paths.py     (modified: one new test)
 
 WHAT CHANGES
 
-  1. macOS memory probe rebuilt. The old vm_stat formula (free + inactive +
-     speculative) undercounts badly: unified-memory machines keep their real
-     headroom in caches, and inactive anonymous pages may be dirty and
-     swap-bound anyway. New order:
-       primary   memory_pressure's "System-wide memory free percentage"
-                 x hw.memsize -- Apple's own pressure-based availability
-       fallback  vm_stat free + purgeable + file-backed (the pool behind
-                 Activity Monitor's "available": free + cached files)
-     Linux /proc/meminfo path unchanged. On the reported machine this should
-     read ~10GB -> memory allows 8 -> core bound wins -> 4 workers.
-     field_rgx: MEMORY_PRESSURE_PCT_rgx, VM_STAT_PURGEABLE_rgx,
-     VM_STAT_FILE_BACKED_rgx added; the inactive/speculative regexes removed.
+  Every run now ends with a timing line on stderr, printed just before the
+  corrections count:
 
-  2. The silent gap was rasterization: the parent renders all pages before
-     sizing runs, and at 400dpi x 82 pages that is many mute seconds.
-     enumerate_pages/_rasterize_pdf/_rasterize_with_pdfium now thread an
-     optional (done, total) progress callback, and the CLI shows
-     "  rasterizing page X/Y" in the same style as recognition (the
-     _progress helper gained a verb parameter). Bundles, bare images, and
-     the poppler subprocess path do not narrate; only the pdfium loop does.
-     No behavioral change for callers that pass nothing.
+      timing: rasterize 11.2s, recognize 96.4s (1.2s/page), correct 0.9s, total 113.1s
 
-  Expected stderr sequence after this:
-      error patterns: 21 loaded
-        rasterizing page 82/82
-      workers: 4 (8 cores -> 4, 10.2GB free -> 8 @ 900MB/worker, 82 pages)
-      loading recognizer in 4 workers (onnxruntime + models)...
-        recognizing page 82/82
+  Phases that did not run are simply absent -- a --cached run reports only
+  correct and total. The per-page recognition rate is the portable number:
+  it holds its meaning across documents of different lengths, so machines
+  and --workers sweeps compare directly. The clock is time.monotonic(),
+  started at the top of _run; total therefore includes everything, including
+  --pdf-out writing, while the named phases cover the three big blocks.
 
-  On the 50% btop saturation: that is the sequential engine's own intra-op
-  threading, and it is the expected ceiling at 1 worker. It should climb
-  substantially at 4 workers x 2 capped threads.
+  No flags, no behavior changes otherwise.
 
 TESTS
 
-  test_parallel.py grows to 14: memory_pressure percentage parse, the
-  missing-percentage-line fallback trigger, and the corrected vm_stat pool
-  (with the field numbers cited in the docstring). Full suite: 121 passed,
-  pyflakes clean. End-to-end re-verified: rasterizing counter appears in the
-  gap, pooled output byte-identical to the previous build.
+  test_cli_paths.py gains test_timing_line_reports_the_run: a cached run
+  must end with exactly one timing line naming correct and total. Full
+  suite: 122 passed, pyflakes clean. End-to-end verified in both modes:
 
-  NOTE: memory_pressure and hw.memsize cannot run in the build sandbox
-  (Linux); the parse layer is pinned by canned text, but the live macOS
-  probe path gets its first real execution on your machine. If the workers
-  line still reads low, run `memory_pressure | tail -1` and send the output.
+      timing: rasterize 0.1s, recognize 9.7s (2.4s/page), correct 0.4s, total 10.2s
+      timing: correct 0.0s, total 0.0s        (--cached)
+
+SUGGESTED FIRST USE
+
+  One sweep answers the remaining performance question with numbers:
+
+      for n in 1 2 4 6; do smart-pdf-ocr doc.pdf -o /tmp/t$n.txt --workers $n --force; done
+
+  and compare the s/page figures. If 6 beats 4 on the M3, the core bound
+  (cores // 2) is worth revisiting; if 4 and 6 tie, it is confirmed.
 
 # End of file #

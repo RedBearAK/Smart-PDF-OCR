@@ -136,7 +136,9 @@ Workers are spawned processes, each with its own engine: a crash is isolated and
 aborts the run naming its page, and results always reassemble in page order
 before correction sees them, so nothing downstream changes at all. `--workers 1`
 takes the original sequential code path untouched. Either way the multi-second
-model load now announces itself instead of looking like a hang.
+model load now announces itself instead of looking like a hang, and every run
+ends with a timing line -- rasterize, recognize (with a per-page rate), correct,
+total -- so machines and worker counts compare on numbers instead of feel.
 
 ## Page markers in the text output
 

@@ -20,6 +20,7 @@ work had been thrown away. A missing file is a usage error, not a traceback.
 
 import os
 import sys
+import time
 import shutil
 import argparse
 
@@ -200,27 +201,50 @@ def _write_pdf(args, pages, corrected, image_paths):
     print("searchable PDF: {0} ({1} pages)".format(args.pdf_out, len(sheet)), file=sys.stderr)
 
 
-def _load_pages(args):
+def _load_pages(args, timing):
     if args.cached:
         return load_cached_ocr(args.cached), None, ()
 
     def raster_tick(done, total):
         _progress(done, total, args.quiet, verb="rasterizing")
 
+    mark = time.monotonic()
     image_paths, workdir = enumerate_pages(args.input, dpi=args.dpi, progress=raster_tick)
+    timing["rasterize"] = time.monotonic() - mark
     try:
         dpi_hint = args.dpi if isinstance(args.dpi, int) else None
         workers, reason = size_pool(len(image_paths), dpi_hint, pinned=args.workers)
         print("workers: {0} ({1})".format(workers, reason), file=sys.stderr)
+        mark = time.monotonic()
         if workers > 1:
             pages = _recognize_pool(image_paths, workers, quiet=args.quiet)
         else:
             pages = _recognize_all(image_paths, quiet=args.quiet)
+        timing["recognize"] = time.monotonic() - mark
         return pages, workdir, tuple(image_paths)
     except Exception:
         if workdir:
             shutil.rmtree(workdir, ignore_errors=True)
         raise
+
+
+def _print_timing(timing, page_count, started):
+    """Where the minutes went, so machines and worker counts can be compared.
+
+    The per-page recognition rate is the portable number: it holds its meaning
+    across documents of different lengths, which the totals do not.
+    """
+    parts = []
+    for phase in ("rasterize", "recognize", "correct"):
+        seconds = timing.get(phase)
+        if seconds is None:
+            continue
+        note = ""
+        if phase == "recognize" and page_count:
+            note = " (%.1fs/page)" % (seconds / page_count)
+        parts.append("%s %.1fs%s" % (phase, seconds, note))
+    parts.append("total %.1fs" % (time.monotonic() - started))
+    print("timing: " + ", ".join(parts), file=sys.stderr)
 
 
 def _print_support(diagnostics):
@@ -295,6 +319,7 @@ def main(argv=None):
 
 
 def _run(argv=None):
+    started = time.monotonic()
     parser = build_parser()
     args = parser.parse_args(argv)
     args.input = args.input_flag or args.input_pos
@@ -363,7 +388,9 @@ def _run(argv=None):
     elif args.force_ascii:
         ascii_mode = MODE_FORCE
 
-    pages, workdir, image_paths = _load_pages(args)
+    timing = {}
+    pages, workdir, image_paths = _load_pages(args, timing)
+    mark = time.monotonic()
     try:
         corrected, report, diagnostics = correct_document(pages, conf_gate=args.gate,
                                                           profile=profile,
@@ -378,6 +405,7 @@ def _run(argv=None):
         if workdir:
             shutil.rmtree(workdir, ignore_errors=True)
         raise
+    timing["correct"] = time.monotonic() - mark
 
     _print_support(diagnostics)
 
@@ -440,6 +468,7 @@ def _run(argv=None):
         print("confident disagreements: {0} ({1} character, {2} spacing) - not corrected".format(
             len(disagreements), characters, len(disagreements) - characters), file=sys.stderr)
 
+    _print_timing(timing, len(pages), started)
     print("corrections: " + str(len(report)), file=sys.stderr)
     if args.report:
         for page_number, kind, old, new in report:
