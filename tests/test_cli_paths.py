@@ -299,6 +299,26 @@ def test_missing_explicit_support_dir_is_an_error():
     return code == 2 and "is not a folder" in err
 
 
+def test_report_is_on_by_default_and_no_report_silences_it():
+    """The change report narrates by default; --no-report turns it off.
+    An error-pattern hit resolved against a known term forces one change."""
+    dump, folder = _support_setup()
+    with open(os.path.join(folder, "known_patterns.txt"), "a", encoding="utf-8") as handle:
+        handle.write("WORLDWIDE\n")
+    with open(dump, "w", encoding="utf-8") as handle:
+        handle.write('{"1": {"txts": ["SHIPPING WORLOWIDE"], "scores": [0.99]}}')
+    code_default, err_default = _run(["--cached", dump, "-o", "-"])
+    # An explicit review path avoids the auto run folder, whose time-stamped
+    # name would collide when two runs share a wall-clock second.
+    review = _fresh(".tsv")
+    code_silent, err_silent = _run(["--cached", dump, "-o", "-", "--no-report",
+                                    "--review-out", review])
+    told = "uncorrected low-confidence lines" in err_default
+    silenced = "uncorrected low-confidence lines" not in err_silent
+    print(f"  default={code_default} told={told}  no-report={code_silent} silenced={silenced}")
+    return code_default == 0 and code_silent == 0 and told and silenced
+
+
 def main():
     tests = [
         test_missing_input_file_is_a_usage_error,
@@ -321,6 +341,7 @@ def main():
         test_support_two_profiles_are_refused_by_name,
         test_explicit_flag_beats_support_file,
         test_missing_explicit_support_dir_is_an_error,
+        test_report_is_on_by_default_and_no_report_silences_it,
     ]
     score = 0
     for test in tests:

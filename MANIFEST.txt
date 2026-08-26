@@ -1,61 +1,34 @@
-MANIFEST.txt -- ocr_support tarball
+MANIFEST.txt -- ocr_report tarball
 Apply into: repo root (dev_beta)
-Apply after: ocr_outdirs
+Apply after: ocr_support
 
 FILES (full drop-in replacements)
 
-  README.md                   (modified: Invoking it section)
-  src/smart_pdf_ocr/cli.py    (modified)
-  tests/test_cli_paths.py     (modified: four new tests)
+  README.md                   (modified: --report dropped from examples, default noted)
+  src/smart_pdf_ocr/cli.py    (modified: two argparse lines)
+  tests/test_cli_paths.py     (modified: one new test)
 
 WHAT CHANGES
 
-  The input-side mirror of ocr_outdirs: the standing files leave the
-  invocation. When --known-patterns / --error-patterns / --profile /
-  --learn-profile are omitted, a _smartocr_support folder BESIDE the input
-  (leading underscore, sorts above the documents; --support-dir overrides)
-  supplies:
+  The change report prints by default. --report remains accepted (now a
+  no-op for compatibility with saved commands); --no-report silences the
+  report. --quiet is untouched and keeps its single meaning: the per-page
+  progress line. The two switches stay orthogonal on purpose -- liveness
+  narration and content reporting are different things to want off.
 
-      known_patterns.txt
-      error_patterns.txt
-      <anything>.json         the vendor profile
+  The GalaxSea invocation is now, in full:
 
-  Rules:
-
-  - Announced, never silent:
-      support: .../_smartocr_support (known_patterns.txt, error_patterns.txt,
-               profile galaxsea.json (load+update))
-  - An explicit flag wins for that file, exactly as on the output side.
-  - A lone .json becomes BOTH ends of the profile round-trip: loaded
-    before the run and updated by learning after it, so canonicals
-    compound across runs (the old runbook wrote galaxsea.json every run
-    but never loaded it back). Two or more .json files are refused BY
-    NAME with the flag to pass -- no guessing.
-  - A missing auto folder is an unconfigured folder, not an error; a
-    missing --support-dir is an error.
-  - Round-trip exemption in the overwrite guard: --learn-profile pointing
-    at the same file as --profile no longer demands --force -- updating a
-    file you are also loading is declared intent, like --review-in with
-    --review-out. (Standing friction fixed: repeat --learn-profile runs
-    previously exited 2 without --force.)
-
-  The GalaxSea workflow becomes: put known_patterns.txt,
-  error_patterns.txt and galaxsea.json in _smartocr_support once; the
-  user drops PDFs in the folder and runs
-
-      smart-pdf-ocr FILENAME.pdf
-
-  (--report to taste). The working folder holds nothing but documents,
-  their run folders, and the support folder.
+      smart-pdf-ocr PDF_FILE
 
 TESTS
 
-  test_cli_paths.py +4: auto-load announces all three and wires them
-  (error-pattern count proves plumbing) with the profile round-tripping
-  sans --force; two JSONs refused naming both; an explicit
-  --error-patterns beats the folder copy; a missing --support-dir errors.
-  Standalone 20/20; full suite 135 passed, pyflakes clean. End-to-end
-  from a foreign CWD: support announced, profile grew from 0 to 1
-  clusters in place, outputs filed in the run folder.
+  test_cli_paths.py: one new test forces a correction (error-pattern hit
+  resolved against a known term) and asserts the report narrates by
+  default and falls silent under --no-report. The test's second run
+  routes around the auto run folder via an explicit --review-out, because
+  two runs inside one wall-clock second would collide on the time-stamped
+  folder name -- a test-speed artifact no human rerun can reproduce, and
+  the refusal is the guard working. Standalone 21/21; full suite 136
+  passed, pyflakes clean.
 
 # End of file #

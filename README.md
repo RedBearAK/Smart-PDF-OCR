@@ -224,7 +224,9 @@ loaded is announced on stderr; an explicit flag wins per file;
 ``--support-dir DIR`` points somewhere else. A working folder therefore needs
 to hold nothing but the PDFs: drop a document, run
 ``smart-pdf-ocr FILENAME.pdf``, and everything standing is found and
-everything produced is filed.
+everything produced is filed. The change report prints by default -- a
+correction tool should narrate its corrections -- and ``--no-report``
+silences it (``--quiet`` stays what it was: the progress line only).
 
 Explicit paths still win, per artifact -- an explicit `-o`, `--review-out` or
 `--pdf-out` lands exactly where stated and is never moved into the folder.
@@ -284,10 +286,10 @@ marginally higher mean OCR confidence (0.9883 vs 0.9877) at the same speed.
 
 ```
 # full pipeline on a document
-smart-pdf-ocr invoices.pdf -o corrected.txt --report
+smart-pdf-ocr invoices.pdf -o corrected.txt
 
 # run the correction layer on a saved OCR dump (skips recognition)
-smart-pdf-ocr --cached ocr_dump.json -o corrected.txt --report
+smart-pdf-ocr --cached ocr_dump.json -o corrected.txt
 ```
 
 The saved-OCR dump is `{ "1": {"txts": [...], "scores": [...]}, ... }`.
@@ -300,7 +302,7 @@ declined to change, as a spreadsheet you can edit and hand straight back:
 ```
 smart-pdf-ocr invoices.pdf --review-out review.tsv -o corrected.txt
 # open review.tsv, fill in the corrected_text column where the tool got it wrong
-smart-pdf-ocr invoices.pdf --review-in review.tsv -o corrected.txt --report
+smart-pdf-ocr invoices.pdf --review-in review.tsv -o corrected.txt
 ```
 
 Blank `corrected_text` accepts what the tool did. Filled, it forces your text.

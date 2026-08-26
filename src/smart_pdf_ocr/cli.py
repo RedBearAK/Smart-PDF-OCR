@@ -350,7 +350,10 @@ def build_parser():
                         help="rasterization DPI for real PDFs, or 'auto' for the scan's "
                              "native resolution (the default)")
     parser.add_argument("--gate", type=float, default=0.90, help="confidence gate for correction")
-    parser.add_argument("--report", action="store_true", help="print the change report to stderr")
+    parser.add_argument("--report", action="store_true", default=True,
+                        help="print the change report to stderr (the default)")
+    parser.add_argument("--no-report", dest="report", action="store_false",
+                        help="suppress the change report")
     parser.add_argument("--review-out", help="write a review file (.tsv/.csv) of every flagged line")
     parser.add_argument("--review-in", help="apply human corrections from a completed review file")
     parser.add_argument("--profile", help="load a vendor profile of canonicals (JSON)")
